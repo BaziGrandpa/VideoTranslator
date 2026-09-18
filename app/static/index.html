@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Video Translator</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2216%22 fill=%22%2338d39f%22/><text x=%2232%22 y=%2241%22 text-anchor=%22middle%22 font-size=%2228%22 font-family=%22Arial%22 font-weight=%22700%22 fill=%22%2306251b%22>VT</text></svg>" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260918-2" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">VT</div>
+          <div>
+            <strong>Video Translator</strong>
+            <small>Local subtitle workbench</small>
+          </div>
+        </div>
+
+        <button id="new-project-button" class="primary full">＋ New project</button>
+        <div class="provider-control">
+          <label for="translation-provider">Translation provider</label>
+          <select id="translation-provider">
+            <option value="auto">Auto: Codex → Grok</option>
+            <option value="codex">Codex only</option>
+            <option value="grok">Grok only</option>
+          </select>
+          <label for="codex-model" class="secondary-provider-label">Codex model</label>
+          <select id="codex-model">
+            <option value="">CLI configured default</option>
+          </select>
+        </div>
+        <div id="health" class="health"></div>
+        <div class="sidebar-label">Projects</div>
+        <div id="project-list" class="project-list"></div>
+      </aside>
+
+      <main class="main">
+        <section id="welcome" class="welcome">
+          <div class="welcome-card">
+            <span class="eyebrow">YOUTUBE → BILINGUAL SUBTITLES → MP4</span>
+            <h1>Review every subtitle before the final render</h1>
+            <p>Paste a video URL to download, retrieve English subtitles, and translate them. Review the timing and wording before FFmpeg burns them in.</p>
+            <button id="welcome-new-project" class="primary">Create your first project</button>
+          </div>
+        </section>
+
+        <section id="project-view" class="project-view hidden">
+          <header class="project-header">
+            <div>
+              <div id="project-kicker" class="eyebrow"></div>
+              <h1 id="project-title">Loading…</h1>
+              <div id="project-meta" class="muted"></div>
+            </div>
+            <div id="project-actions"></div>
+          </header>
+
+          <div class="pipeline-card">
+            <div class="pipeline-top">
+              <strong id="stage-label">Preparing</strong>
+              <span id="progress-label">0%</span>
+            </div>
+            <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
+            <div id="current-step" class="current-step hidden"></div>
+            <div id="project-error" class="error-box hidden"></div>
+            <div id="part-progress" class="part-progress"></div>
+          </div>
+
+          <section id="global-context-panel" class="global-context-panel hidden">
+            <div class="context-panel-head">
+              <div>
+                <span class="eyebrow">PASS 0 REVIEW</span>
+                <h2>Translation guidance</h2>
+                <p>Review the project context and terminology before coherent translation begins. Every later translation pass will use the approved version.</p>
+              </div>
+              <span id="context-provider" class="context-provider"></span>
+            </div>
+            <div class="context-copy-fields">
+              <label>
+                Project overview
+                <textarea id="context-overview" rows="5" placeholder="What the video is about, important people, and narrative context"></textarea>
+              </label>
+              <label>
+                Translation style
+                <textarea id="context-style" rows="5" placeholder="Tone, wording, naming, and readability instructions"></textarea>
+              </label>
+            </div>
+            <div class="context-terms-head">
+              <div>
+                <strong>Terminology</strong>
+                <span class="muted">Person names keep their original spelling; other terms use your preferred natural wording</span>
+              </div>
+              <button id="add-context-term" type="button">＋ Add term</button>
+            </div>
+            <div class="context-term-columns" aria-hidden="true">
+              <span>Source</span><span>Preferred translation</span><span>Occurrences</span><span>Category</span><span>Must use</span><span></span>
+            </div>
+            <div id="context-terms" class="context-terms"></div>
+            <div id="context-error" class="error-box hidden"></div>
+            <div class="context-panel-actions">
+              <span id="context-save-state" class="muted">Review required before Pass 1</span>
+              <button id="save-context-draft" type="button">Save draft</button>
+              <button id="approve-context" type="button" class="primary">Save and continue translation</button>
+            </div>
+          </section>
+
+          <section id="review-workspace" class="review-workspace hidden">
+            <div class="player-column">
+              <div class="video-stage">
+                <video id="video" controls preload="metadata"></video>
+                <img id="exact-preview-image" class="exact-preview-image hidden" alt="Exact FFmpeg subtitle preview" title="Click the left or right half to move between subtitles" />
+                <div id="exact-preview-badge" class="exact-preview-badge hidden"></div>
+                <div id="exact-preview-loading" class="exact-preview-loading hidden"></div>
+                <div class="bottom-mask"></div>
+                <div id="subtitle-preview" class="subtitle-preview hidden">
+                  <div id="preview-cn" class="preview-cn"></div>
+                  <div id="preview-en" class="preview-en"></div>
+                </div>
+              </div>
+
+              <div class="timing-panel">
+                <div class="timing-row">
+                  <button id="scroll-to-active">Scroll to current subtitle</button>
+                  <button id="set-start">Set start to current time</button>
+                  <button id="set-end">Set end to current time</button>
+                  <button id="nudge-back">Shift −100 ms</button>
+                  <button id="nudge-forward">Shift +100 ms</button>
+                </div>
+                <div class="timing-row">
+                  <button id="split-segment">Split at current time</button>
+                  <button id="merge-segment">Merge with next</button>
+                  <label class="loop-control"><input id="loop-current" type="checkbox" /> Loop selected subtitle</label>
+                  <span id="save-state" class="save-state">Saved</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="subtitle-column">
+              <div class="subtitle-toolbar">
+                <div>
+                  <strong>Subtitle review</strong>
+                  <span id="segment-summary" class="muted"></span>
+                </div>
+                <div class="subtitle-actions">
+                  <button id="review-suggestions" class="hidden">Review suggestions</button>
+                  <div class="preview-style-actions">
+                    <button id="subtitle-style-button">Subtitle style</button>
+                    <button id="exact-preview-button">Preview</button>
+                  </div>
+                  <button id="rebuild-subtitles">Rebuild subtitles</button>
+                  <button id="approve-render" class="primary">Approve all and render</button>
+                </div>
+              </div>
+              <div id="subtitle-style-panel" class="subtitle-style-panel hidden">
+                <div class="style-panel-head">
+                  <div>
+                    <strong>Subtitle style</strong>
+                    <span class="muted">Project-specific preview and render settings</span>
+                  </div>
+                  <div class="style-panel-head-actions">
+                    <button id="copy-subtitle-style" type="button">Copy</button>
+                    <button id="paste-subtitle-style" type="button">Paste</button>
+                    <button id="close-subtitle-style" type="button">Close</button>
+                  </div>
+                </div>
+                <label class="style-english-toggle">
+                  <input id="style-show-english" type="checkbox" />
+                  <span>Show English subtitles</span>
+                </label>
+                <div class="style-fields">
+                  <label>Chinese size<input id="style-chinese-size" type="number" min="12" max="120" step="1" /></label>
+                  <label>English size<input id="style-english-size" type="number" min="12" max="120" step="1" /></label>
+                  <label>Chinese color<input id="style-chinese-color" type="color" /></label>
+                  <label>English color<input id="style-english-color" type="color" /></label>
+                  <label>Chinese outline<input id="style-chinese-outline" type="number" min="0" max="10" step="0.5" /></label>
+                  <label>English outline<input id="style-english-outline" type="number" min="0" max="10" step="0.5" /></label>
+                  <label>Bottom margin<input id="style-bottom-margin" type="number" min="0" max="400" step="1" /></label>
+                  <label>Line gap<input id="style-line-gap" type="number" min="0" max="300" step="1" /></label>
+                  <label>Horizontal margin<input id="style-horizontal-margin" type="number" min="0" max="600" step="1" /></label>
+                  <label>Mask height (%)<input id="style-mask-height" type="number" min="5" max="80" step="1" /></label>
+                  <label>Mask opacity (%)<input id="style-mask-opacity" type="number" min="0" max="100" step="1" /></label>
+                </div>
+                <div class="style-panel-actions">
+                  <span id="style-save-state" class="muted"></span>
+                  <button id="save-subtitle-style" type="button" class="primary">Save style</button>
+                </div>
+              </div>
+              <div class="subtitle-table-head">
+                <span>Timing</span><span>English / Translation</span><span>Reviewed</span>
+              </div>
+              <div id="segment-list" class="segment-list"></div>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="new-project-dialog">
+      <form id="new-project-form" method="dialog">
+        <div class="dialog-head">
+          <div>
+            <span class="eyebrow">NEW PROJECT</span>
+            <h2>Translate a YouTube video</h2>
+          </div>
+          <button type="button" id="close-dialog" class="icon-button">×</button>
+        </div>
+        <label>
+          YouTube URL
+          <input id="source-url" type="url" required placeholder="https://www.youtube.com/watch?v=…" />
+        </label>
+        <div class="form-grid">
+          <label>
+            Target language
+            <select id="target-language">
+              <option value="zh-CN">Simplified Chinese</option>
+              <option value="zh-TW">Traditional Chinese</option>
+            </select>
+          </label>
+          <label>
+            Maximum resolution
+            <select id="max-height">
+              <option value="1080">1080p</option>
+              <option value="720">720p</option>
+              <option value="2160">2160p</option>
+            </select>
+          </label>
+        </div>
+        <div id="form-error" class="error-box hidden"></div>
+        <div class="dialog-actions">
+          <button type="button" id="cancel-dialog">Cancel</button>
+          <button type="submit" class="primary">Start processing</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="rename-project-dialog">
+      <form id="rename-project-form" method="dialog">
+        <div class="dialog-head">
+          <div>
+            <span class="eyebrow">PROJECT NAME</span>
+            <h2>Rename project</h2>
+          </div>
+          <button type="button" id="close-rename-dialog" class="icon-button">×</button>
+        </div>
+        <label>
+          Display name
+          <input id="project-display-name" type="text" maxlength="160" autocomplete="off" />
+        </label>
+        <div class="muted" style="font-size:11px;margin-top:8px">Leave empty to use the original video title.</div>
+        <div id="rename-project-error" class="error-box hidden"></div>
+        <div class="dialog-actions">
+          <button type="button" id="cancel-rename-dialog">Cancel</button>
+          <button type="submit" class="primary">Save name</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="rebuild-subtitles-dialog" class="rebuild-dialog">
+      <form id="rebuild-subtitles-form" method="dialog">
+        <div class="dialog-head">
+          <div>
+            <span class="eyebrow">REBUILD SUBTITLES</span>
+            <h2>Choose rebuild scope</h2>
+          </div>
+          <button type="button" id="close-rebuild-dialog" class="icon-button">×</button>
+        </div>
+        <label class="rebuild-mode-option">
+          <input type="radio" name="rebuild-mode" value="selected" checked />
+          <span><strong>Selected Windows</strong><small>Keep current subtitles until the selected ranges pass Pass 0–3.</small></span>
+        </label>
+        <label class="rebuild-mode-option">
+          <input type="radio" name="rebuild-mode" value="full" />
+          <span><strong>Full rebuild</strong><small>Immediately delete all current translation data and reconstruct the complete pipeline.</small></span>
+        </label>
+        <div id="rebuild-window-panel">
+          <div class="rebuild-window-toolbar">
+            <span id="rebuild-selection-summary" class="muted"></span>
+            <div><button type="button" id="select-all-rebuild-windows">Select all</button><button type="button" id="clear-rebuild-windows">Clear</button></div>
+          </div>
+          <div id="rebuild-window-list" class="rebuild-window-list"></div>
+        </div>
+        <div id="rebuild-full-warning" class="rebuild-warning hidden">
+          Full rebuild clears the current Pass 0 context, Tokens, Parts, Cues, timing edits, and review issues as soon as you confirm. The downloaded video and source captions remain.
+        </div>
+        <div id="rebuild-dialog-error" class="error-box hidden"></div>
+        <div class="dialog-actions">
+          <button type="button" id="cancel-rebuild-dialog">Cancel</button>
+          <button type="submit" id="confirm-rebuild-subtitles" class="primary">Rebuild selected Windows</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="/static/app.js?v=20260918-2" defer></script>
+  </body>
+</html>

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "overview": { "type": "string" },
+    "style": { "type": "string" },
+    "terms": {
+      "type": "array",
+      "maxItems": 60,
+      "items": {
+        "type": "object",
+        "properties": {
+          "source": { "type": "string" },
+          "target": { "type": "string" },
+          "category": {
+            "type": "string",
+            "enum": ["person", "organization", "brand", "product", "place", "technical", "slang", "other"]
+          },
+          "must_use": { "type": "boolean" }
+        },
+        "required": ["source", "target", "category", "must_use"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["overview", "style", "terms"],
+  "additionalProperties": false
+}

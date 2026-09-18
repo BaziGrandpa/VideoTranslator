@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "cues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "start_token_id": { "type": "integer" },
+          "end_token_id": { "type": "integer" },
+          "translation": { "type": "string" }
+        },
+        "required": ["start_token_id", "end_token_id", "translation"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["cues"],
+  "additionalProperties": false
+}

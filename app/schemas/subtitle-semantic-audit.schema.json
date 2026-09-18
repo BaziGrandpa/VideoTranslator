@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "issue_id": { "type": "string" },
+          "type": {
+            "type": "string",
+            "enum": ["too_long", "semantic_mismatch", "terminology_inconsistency"]
+          },
+          "start_token_id": { "type": "integer" },
+          "end_token_id": { "type": "integer" },
+          "reason": { "type": "string" },
+          "replacement_cues": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "start_token_id": { "type": "integer" },
+                "end_token_id": { "type": "integer" },
+                "translation": { "type": "string" }
+              },
+              "required": ["start_token_id", "end_token_id", "translation"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "issue_id",
+          "type",
+          "start_token_id",
+          "end_token_id",
+          "reason",
+          "replacement_cues"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["issues"],
+  "additionalProperties": false
+}
