@@ -9,23 +9,40 @@ from app.pipeline import Pipeline
 from app.repository import Repository
 
 
-def test_translate_saves_each_window_and_reference_translation(tmp_path: Path, monkeypatch) -> None:
+def _tokens(count: int) -> list[dict]:
+    return [
+        {
+            "text": f"word-{index}." if index % 4 == 3 else f"word-{index}",
+            "start_ms": index * 500,
+            "end_ms": (index + 1) * 500,
+            "source": "test",
+        }
+        for index in range(count)
+    ]
+
+
+def _segment(sentence: dict, translation: str) -> dict:
+    return {
+        "start_ms": sentence["start_ms"],
+        "end_ms": sentence["end_ms"],
+        "start_token_id": sentence["start_token_id"],
+        "end_token_id": sentence["end_token_id"],
+        "source_sentence_id": sentence["source_sentence_id"],
+        "sub_id": 0,
+        "source_text": sentence["source_sentence"],
+        "translated_text": translation,
+        "quality_flags": [],
+        "status": "machine_translated",
+    }
+
+
+def test_translate_saves_part_level_pass2_and_pass3_results(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "pipeline.db"
     init_db(database)
     repository = Repository(database)
     project = repository.create_project("https://youtu.be/example")
     repository.update_project(project["id"], title="Test video")
-    tokens = [
-        {
-            "text": f"word-{index}.",
-            "start_ms": index * 1000,
-            "end_ms": (index + 1) * 1000,
-            "source": "test",
-        }
-        for index in range(100)
-    ]
-    repository.replace_timed_tokens(project["id"], tokens)
-
+    repository.replace_timed_tokens(project["id"], _tokens(100))
     monkeypatch.setattr(
         pipeline_module,
         "generate_global_translation_context",
@@ -33,249 +50,132 @@ def test_translate_saves_each_window_and_reference_translation(tmp_path: Path, m
             {
                 "overview": "全局概述",
                 "style": "自然简洁",
-                "terms": [
-                    {
-                        "source": "Katie",
-                        "target": "Katie",
-                        "category": "person",
-                        "must_use": True,
-                    }
-                ],
+                "terms": [{"source": "Katie", "target": "Katie", "category": "person", "must_use": True}],
             },
             "codex",
         ),
     )
+    monkeypatch.setattr(
+        pipeline_module,
+        "generate_reference_translation",
+        lambda *args, **kwargs: (
+            {"source_text": "完整英文原文", "reference_translation": "完整、连贯的中文参考译文。"},
+            "codex",
+        ),
+    )
+    pass2_calls = []
 
-    def fake_reference(*args, **kwargs):
-        assert kwargs["global_context"]["terms"][0]["target"] == "Katie Approved"
+    def fake_align(_tokens, sentences, *_args, **kwargs):
+        pass2_calls.append((len(sentences), kwargs["providers"]))
         return (
-            {
-                "source_text": "完整英文原文",
-                "reference_translation": "完整、连贯的中文参考译文。",
-            },
+            [_segment(item, "这是一条故意较长的中文父句用于测试第三阶段拆分处理") for item in sentences],
             "codex",
         )
 
-    monkeypatch.setattr(pipeline_module, "generate_reference_translation", fake_reference)
+    pass3_calls = []
 
-    def fake_window(
-        all_tokens,
-        _language,
-        _title,
-        start,
-        end,
-        _context,
-        _previous,
-        *,
-        providers=None,
-        codex_model=None,
-        audit_dir=None,
-    ):
-        assert providers == ("codex", "grok")
-        assert codex_model == pipeline_module.settings.codex_model
-        assert _context["terms"][0]["target"] == "Katie Approved"
+    def fake_split(_tokens, parents, *_args, **_kwargs):
+        pass3_calls.append(len(parents))
         return (
             [
                 {
-                    "start_ms": all_tokens[start]["start_ms"],
-                    "end_ms": all_tokens[end]["end_ms"],
-                    "start_token_id": start,
-                    "end_token_id": end,
-                    "source_text": " ".join(token["text"] for token in all_tokens[start : end + 1]),
-                    "translated_text": "这一批。",
+                    **parent,
+                    "sub_id": 1,
+                    "translated_text": "拆分后的短句",
                     "quality_flags": [],
+                    "status": "machine_translated",
                 }
+                for parent in parents
             ],
             "codex",
         )
 
-    monkeypatch.setattr(pipeline_module, "plan_subtitle_window", fake_window)
-    audit_calls = []
-
-    def fake_audit(
-        _tokens,
-        segments,
-        _language,
-        _title,
-        start,
-        end,
-        _context,
-        _previous,
-        provider,
-        *,
-        codex_model=None,
-        audit_dir=None,
-        include_issues=False,
-    ):
-        assert _context["terms"][0]["target"] == "Katie Approved"
-        audit_calls.append((start, end, provider, codex_model, audit_dir, len(segments)))
-        issues = [
-            {
-                "issue_id": "review-first-cue",
-                "action": "suggest_translation",
-                "severity": "medium",
-                "issue_types": ["wording"],
-                "reason": "Review the first cue wording.",
-                "start_token_id": segments[0]["start_token_id"],
-                "end_token_id": segments[0]["end_token_id"],
-                "replacement_cues": [
-                    {
-                        "start_token_id": segments[0]["start_token_id"],
-                        "end_token_id": segments[0]["end_token_id"],
-                        "translation": "建议译文",
-                    }
-                ],
-                "auto_applied": False,
-            }
-        ]
-        return (segments, issues) if include_issues else segments
-
-    monkeypatch.setattr(pipeline_module, "audit_subtitle_window", fake_audit)
+    monkeypatch.setattr(pipeline_module, "align_part_sentences", fake_align)
+    monkeypatch.setattr(pipeline_module, "split_long_sentences", fake_split)
     monkeypatch.setattr(
         pipeline_module,
         "settings",
         replace(pipeline_module.settings, subtitle_planner_window_tokens=40, data_dir=tmp_path),
     )
-
     pipeline = Pipeline(repository)
     pipeline.translate(project["id"])
-
     checkpoint = repository.get_project(project["id"])
-    assert checkpoint is not None
     assert checkpoint["status"] == "waiting_context_review"
-    assert checkpoint["stage"] == "waiting_context_review"
-    assert checkpoint["global_context_approved"] is False
-    assert repository.list_subtitle_parts(project["id"]) == []
-
-    approved_context = checkpoint["global_translation_context"]
-    approved_context["terms"][0]["target"] = "Katie Approved"
+    context = checkpoint["global_translation_context"]
+    context["terms"][0]["target"] = "Katie Approved"
     repository.update_project(
-        project["id"],
-        global_translation_context=approved_context,
-        global_context_approved=1,
-        status="queued",
-        stage="queued",
+        project["id"], global_translation_context=context, global_context_approved=1,
+        status="queued", stage="queued",
     )
     pipeline.translate(project["id"])
 
     parts = repository.list_subtitle_parts(project["id"])
+    source_sentences = repository.list_source_sentences(parts[0]["id"])
+    segments = repository.list_segments(project["id"])
     batches = repository.list_subtitle_batches(parts[0]["id"])
     assert parts[0]["status"] == "completed"
-    assert parts[0]["source_text"] == "完整英文原文"
     assert parts[0]["reference_translation"] == "完整、连贯的中文参考译文。"
-    assert parts[0]["translation_provider"] == "codex"
-    assert [batch["status"] for batch in batches] == ["completed", "completed", "completed"]
-    assert len(repository.list_segments(project["id"])) == 3
-    assert len(audit_calls) == 1
-    assert audit_calls[0][0:2] == (0, 99)
-    assert audit_calls[0][5] == 3
-    assert all(call[2] == "codex" for call in audit_calls)
-    review_issues = repository.list_review_issues(project["id"])
-    assert len(review_issues) == 1
-    assert review_issues[0]["batch_id"] is None
-    assert review_issues[0]["issue_key"].startswith(f"part-{parts[0]['id']}:")
+    assert len(pass2_calls) == 1
+    assert pass2_calls[0][1] == ("codex", "grok")
+    assert pass3_calls == [len(source_sentences)]
+    assert len(segments) == len(source_sentences)
+    assert all(sentence["chinese_sentence"] for sentence in source_sentences)
+    assert all(segment["source_sentence_id"] for segment in segments)
+    assert all(batch["status"] == "completed" for batch in batches)
     assert repository.get_project(project["id"])["status"] == "waiting_review"
-    assert (
-        repository.get_project(project["id"])["global_translation_context"]["terms"][0]["target"]
-        == "Katie Approved"
-    )
 
 
-def test_part_audit_retry_does_not_repeat_completed_pass2_windows(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_pass3_retry_reuses_completed_part_level_pass2(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "pipeline.db"
     init_db(database)
     repository = Repository(database)
     project = repository.create_project("https://youtu.be/example")
     repository.update_project(
-        project["id"],
-        title="Test video",
+        project["id"], title="Test video",
         global_translation_context={"overview": "Context", "style": "Natural", "terms": []},
         global_context_approved=1,
     )
-    tokens = [
-        {
-            "text": f"word-{index}.",
-            "start_ms": index * 1000,
-            "end_ms": (index + 1) * 1000,
-            "source": "test",
-        }
-        for index in range(80)
-    ]
-    repository.replace_timed_tokens(project["id"], tokens)
-    repository.initialize_subtitle_plan(
-        project["id"],
-        [
-            {
-                "start_token_id": 0,
-                "end_token_id": 79,
-                "start_ms": 0,
-                "end_ms": 80_000,
-                "windows": [(0, 39), (40, 79)],
-            }
-        ],
-        40,
+    repository.replace_timed_tokens(project["id"], _tokens(40))
+    monkeypatch.setattr(
+        pipeline_module,
+        "generate_reference_translation",
+        lambda *args, **kwargs: (
+            {"source_text": "Complete source", "reference_translation": "完整参考译文"}, "codex"
+        ),
     )
-    part = repository.list_subtitle_parts(project["id"])[0]
-    repository.update_subtitle_part(
-        part["id"],
-        status="planning_subtitles",
-        source_text="Complete source",
-        reference_translation="完整参考译文",
-        translation_provider="codex",
-    )
-    window_calls = []
+    pass2_calls = 0
 
-    def fake_window(all_tokens, _language, _title, start, end, *_args, **_kwargs):
-        window_calls.append((start, end))
+    def fake_align(_tokens, sentences, *_args, **_kwargs):
+        nonlocal pass2_calls
+        pass2_calls += 1
         return (
-            [
-                {
-                    "start_ms": all_tokens[start]["start_ms"],
-                    "end_ms": all_tokens[end]["end_ms"],
-                    "start_token_id": start,
-                    "end_token_id": end,
-                    "source_text": " ".join(
-                        token["text"] for token in all_tokens[start : end + 1]
-                    ),
-                    "translated_text": "这一批",
-                    "quality_flags": [],
-                }
-            ],
+            [_segment(item, "这是一条故意较长的中文父句用于验证检查点不会重复运行") for item in sentences],
             "codex",
         )
 
-    audit_calls = 0
+    pass3_calls = 0
 
-    def flaky_audit(_tokens, segments, *_args, include_issues=False, **_kwargs):
-        nonlocal audit_calls
-        audit_calls += 1
-        if audit_calls == 1:
+    def flaky_split(_tokens, parents, *_args, **_kwargs):
+        nonlocal pass3_calls
+        pass3_calls += 1
+        if pass3_calls == 1:
             raise RuntimeError("temporary Pass 3 failure")
-        return (segments, []) if include_issues else segments
+        return ([{**item, "sub_id": 1} for item in parents], "codex")
 
-    monkeypatch.setattr(pipeline_module, "plan_subtitle_window", fake_window)
-    monkeypatch.setattr(pipeline_module, "audit_subtitle_window", flaky_audit)
+    monkeypatch.setattr(pipeline_module, "align_part_sentences", fake_align)
+    monkeypatch.setattr(pipeline_module, "split_long_sentences", flaky_split)
     monkeypatch.setattr(
         pipeline_module,
         "settings",
         replace(pipeline_module.settings, subtitle_planner_window_tokens=40, data_dir=tmp_path),
     )
     pipeline = Pipeline(repository)
-
     with pytest.raises(RuntimeError, match="temporary Pass 3 failure"):
         pipeline.translate(project["id"])
-
-    assert window_calls == [(0, 39), (40, 79)]
-    assert all(
-        batch["status"] == "completed"
-        for batch in repository.list_subtitle_batches(part["id"])
-    )
+    assert pass2_calls == 1
     assert repository.list_subtitle_parts(project["id"])[0]["status"] == "failed"
 
     pipeline.translate(project["id"])
-
-    assert window_calls == [(0, 39), (40, 79)]
-    assert audit_calls == 2
+    assert pass2_calls == 1
+    assert pass3_calls == 2
     assert repository.get_project(project["id"])["status"] == "waiting_review"

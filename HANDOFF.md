@@ -1,6 +1,6 @@
 # Video Translator Handoff
 
-Last updated: 2026-09-18
+Last updated: 2026-09-19
 
 ## Read This First
 
@@ -21,8 +21,8 @@ Non-negotiable product constraints:
 - Avoid full-video or full-Part LLM validation when a single problematic Window is sufficient.
 - Preserve the raw Timed Token layer. User edits affect Segment/Cue data, not raw tokens.
 
-The workspace currently has no Git metadata. `git status` returns "not a git repository". Be
-careful with existing files because there is no Git rollback available.
+The workspace is a Git repository whose `main` branch tracks
+`https://github.com/BaziGrandpa/VideoTranslator.git`.
 
 ## Product Goal
 
@@ -63,7 +63,8 @@ uses the port/process ownership relationship rather than killing arbitrary Pytho
 - Pipeline orchestration: `app/pipeline.py`
 - Worker: `app/worker.py`
 - Local CLI integration: `app/services/translator.py`
-- Subtitle planning and LLM prompts: `app/services/subtitle_planner.py`
+- Live Pass 0–3 prompts: `app/services/prompts.py`
+- Subtitle planning: `app/services/subtitle_planner.py`
 - Subtitle mechanical quality rules: `app/services/subtitle_quality.py`
 - FFmpeg final rendering: `app/services/renderer.py`
 - FFmpeg exact-frame preview: `app/services/exact_preview.py`
@@ -81,7 +82,9 @@ The frontend is deliberately plain HTML/CSS/JavaScript. There is no frontend bui
 - **Timed Token**: approximately one English word/token with `token_id`, `start_ms`, and `end_ms`.
 - **Cue / Segment / Sequence**: one displayed subtitle unit after segmentation. Use "Cue" in product
   discussions when possible.
-- **Window**: normally about 1,000 English Timed Tokens sent to one Pass 2 call.
+- **Window**: a ~1,000-token rebuild-selection envelope. Pass 2 is one LLM call per Part, not per
+  Window. Selected rebuild still uses Window rows in the UI, then expands them to intersecting
+  English cues.
 - **Part**: approximately 30 minutes of a long video. Parts are independently translated.
 - **Pass**: a major LLM stage, not an internal retry.
 - **Raw layer**: Timed Tokens. Must remain recoverable and unmodified by subtitle editing.
@@ -94,10 +97,8 @@ The frontend is deliberately plain HTML/CSS/JavaScript. There is no frontend bui
 Purpose:
 
 - Create project-wide overview/style guidance.
-- Create globally consistent terminology.
-- Preserve real person names in their original Latin spelling. Translate or preserve other proper
-  terms naturally according to context and established Chinese usage; channel names, usernames,
-  brands, organizations, products, and places are not automatically forced to remain in English.
+- Create globally consistent terminology. Later Parts follow these items; there is no extra
+  hardcoded person-name policy.
 - Prevent terminology drift across Parts, such as inconsistent translations of "doomscrolling".
 
 For videos up to 12,000 Timed Tokens, Pass 0 is direct. Longer videos use chunking and
@@ -152,7 +153,96 @@ Output:
 This pass exists to separate translation quality from subtitle segmentation. The user explicitly
 wants a real "whole English text -> whole Chinese text" stage.
 
-### Pass 2: Timed Cue Draft
+### Current v7 Python Source-Sentence Layer
+
+After Pass 1, Python divides each Part's immutable Timed Tokens into fixed, gap-free
+`source_sentence_id` ranges. English order and timing remain Python-owned.
+
+- Candidate boundaries are terminal `. ? ! , : ;` punctuation.
+- Fragments with fewer than three spoken Tokens merge by punctuation direction:
+  comma/colon/semicolon fragments normally merge right; short complete sentences normally merge
+  left.
+- `>>` or a pause of at least 1,200 ms is a hard boundary. An isolated `Yes.` stays independent
+  when surrounded by long pauses.
+- Punctuation-free speech has a 40-spoken-Token fallback cap.
+- Known stage directions such as `[music]` and speaker markers retain their original Token IDs but
+  do not appear in visible source text. Unknown bracketed text is preserved.
+- Display timing comes from the first and last speech Token in a range, so hidden music Tokens do
+  not keep a subtitle visible through a music gap.
+
+The `source_sentences` table persists the Part-local ID, inclusive Token range, clean English,
+speech-based times, hidden Token IDs, and Pass 2 Chinese. Final `segments` persist
+`source_sentence_id` and `sub_id` for traceability.
+
+### Current Pass 2: Place Pass 1 onto English cues
+
+Pass 2 receives all ordered `{source_sentence_id, source_sentence}` rows for one complete Part, the
+full Pass 1 reference translation, and Pass 0 context. It receives no word-level Token IDs or
+timestamps.
+
+Pass 1 is the translation. Pass 2's first job is to place that Pass 1 text back onto the
+Python-owned English cue IDs. It does not translate the English from scratch. The Chinese for a cue
+is whatever Pass 1 said for that English: a fragment, a clause, or more than one sentence.
+
+Adjacent cues are one unfolding thought. Concatenating the Chinese rows in order should recover the
+Pass 1 passage: no extra facts, no missing facts, and no repeated facts. A row must not become
+self-contained by borrowing the next cue's meaning, and two neighboring rows must not paraphrase
+the same meaning. Light rephrasing is allowed only to sit on a cue boundary. Pass 2 does no length
+control.
+
+Python rejects missing, duplicate, reordered, unknown, or empty ID rows. A full rebuild makes one
+Pass 2 call per Part. A selected rebuild supplies the whole Part as context but outputs only source
+sentences intersecting the selected range. Live prompt: `app/services/prompts.py`. Version:
+`sentence-pipeline-v8.2`.
+
+### Current Pass 3: Overlong Chinese splitting
+
+Python sends only Pass 2 parents above 24 display units to Pass 3. Every input parent contains its
+complete clean English, Pass 2 Chinese, and all raw Tokens in its parent range as
+`{token_id,text,kind}`.
+
+If Chinese punctuation can split a parent, Python does that first and Pass 3-1 only fills
+`end_token_id`. Otherwise Pass 3-2 splits the Chinese and assigns `end_token_id`. This is the only
+stage where English and Chinese inside a sub-cue may not match as meaning groups. Chinese
+readability is primary; Token IDs stay strictly increasing. Prefer 18 display units when already
+splitting; 24 is the hard max. It does not perform semantic or terminology auditing.
+
+Python infers starts from the parent start and the previous end plus one. The final end must equal
+the parent end, and every subrange must contain speech. Invalid structure fails visibly; a valid
+unsplit long parent is retained and flagged for human review.
+
+After Pass 3, Python restores speech-based times and runs one quality stamp over the Part's final
+cues. Pass 2 materialize and Pass 3 splits do not flag review problems on their own. Prompt
+version: `sentence-pipeline-v8.2`. Live prompts: `app/services/prompts.py`. Schemas:
+
+- `app/schemas/subtitle-sentence-alignments.schema.json`
+- `app/schemas/subtitle-sentence-boundaries.schema.json`
+- `app/schemas/subtitle-sentence-splits.schema.json`
+
+### Current review workbench
+
+A cue enters the workbench only after that Part's Pass 3 step finishes (including the no-LLM path
+when nothing is over 24). The stamp writes `quality_flags` and `needs_review`. The browser then
+recomputes types 1–4 from current text and timing, and keeps `pass3_invalid_output` from stored
+flags.
+
+A cue is listed if it has one or more of:
+
+- `target_text_too_long` — more than 24 display units
+- `very_short_duration` — under 700 ms and not a tiny reply
+- `very_long_duration` — over 5000 ms
+- `high_target_reading_speed` — over 12 display units per second
+- `pass3_invalid_output` — Pass 3 could not split the parent
+
+There is no severity. There are no LLM semantic/terminology suggestions and no Apply path.
+19–24 units stay unflagged. `GET /api/projects/{id}/review-issues` returns one row per problem cue.
+The main list “Check readability” count uses the same live set. The `subtitle_review_issues` table
+is leftover; the live path no longer reads or writes it, but a rebuild still deletes old rows.
+
+The sections immediately below describe the retired v6 implementation and are kept only as
+historical diagnostic context.
+
+### Historical v6 Pass 2: Timed Cue Draft
 
 Input:
 
@@ -185,7 +275,7 @@ Important rules:
 - There is deliberately no automatic Pass 2 correction call. An invalid model result remains a
   visible pipeline failure.
 
-### Pass 3: AI First Review
+### Historical v6 Pass 3: AI First Review
 
 This stage was redesigned in the latest implementation.
 
@@ -244,85 +334,16 @@ its Pass 1/2/3 work so errors remain exposed rather than being hidden behind res
 
 ## Latest Review-Issue Implementation
 
-### Database
+The live workbench is described under Current review workbench. The `subtitle_review_issues` table
+and the old Apply/suggestion UI are retired. Rebuild still deletes leftover table rows when it
+clears subtitle state.
 
-New table: `subtitle_review_issues`
+Relevant locations:
 
-Important fields:
-
-- `project_id`
-- `part_id`
-- `batch_id`
-- `issue_key`
-- `action`
-- `issue_types` JSON
-- `severity`
-- `reason`
-- `start_token_id`
-- `end_token_id`
-- `replacement_cues` JSON
-- `auto_applied`
-
-Issues are related to Cues through Token ranges rather than Segment database IDs, because Segment
-IDs can change after resegmentation.
-
-Relevant persistence methods:
-
-- `Repository.replace_part_review_issues`
-- `Repository.replace_part_segments`
-- `Repository.list_review_issues`
-
-The browser asks for confirmation before `Rebuild subtitles`. Once confirmed, the rebuild API
-synchronously clears the project's global translation context, Timed Tokens, Parts, Batches,
-Cues, and review issues before queueing the replacement Pass 0–3 job. It retains the downloaded
-video, source captions, and project-level settings.
-
-### API
-
-Endpoint:
-
-- `GET /api/projects/{project_id}/review-issues`
-
-It combines:
-
-- Persisted Pass 3 issues.
-- Current mechanical quality issues calculated from the current Cue text/timing.
-
-Replacement Cues are enriched with a current `segment_id` when their Token range exactly matches a
-saved Cue. The frontend uses the existing Segment PATCH endpoint to apply a suggestion.
-
-### Frontend Review Mode
-
-Button:
-
-- `Review suggestions (<count>)`
-- While open, the button changes to `All subtitles`.
-
-Behavior:
-
-- Loads all issues regardless of the Cue's Reviewed status.
-- Reviewed currently does not filter, hide, or resolve issues.
-- Applied suggestions remain visible.
-- Each affected Cue displays:
-  1. English source.
-  2. Current Chinese translation, editable.
-  3. Suggested replacement or review note, read-only.
-- An `Apply` button beside a suggestion immediately replaces the current Chinese translation and
-  writes it to SQLite.
-- Enter and blur continue to save manual edits.
-- Multi-Cue issues appear as one Issue group containing all affected Cue rows.
-- Auto-applied structural issues remain visible and are labeled `Auto-applied boundary fix`.
-- Clicking a Cue seeks to its start and starts video playback.
-- During Review mode, playback does not automatically highlight or scroll to another Cue.
-- Exact FFmpeg Preview is disabled in Review mode.
-- Entering Review mode exits an active Exact Preview and cleans its browser/FFmpeg preview state.
-
-Relevant frontend locations:
-
-- Button: `app/static/index.html`
-- Rendering: `renderReviewIssues` in `app/static/app.js`
-- Mode switch: `toggleReviewMode` in `app/static/app.js`
-- Styling: `app/static/styles.css`
+- Quality stamp and live problem list: `app/services/subtitle_quality.py`
+- Stamp after Pass 3: `app/pipeline.py`
+- API: `GET /api/projects/{project_id}/review-issues` in `app/main.py`
+- Frontend: `renderReviewIssues` and `toggleReviewMode` in `app/static/app.js`
 
 ## Subtitle Editing and Rendering Behavior
 
@@ -432,6 +453,33 @@ pairs may look misaligned while neighboring Cues are correct as a group. Python 
 semantic decision.
 
 ## Latest Verification Status
+
+### 2026-09-19 sentence-pipeline-v8.2
+
+Current live contract: Pass 2 places Pass 1 onto English cues with adjacent coherence; Pass 3
+splits only Chinese above 24; Python stamps review flags once after each Part's Pass 3; the
+workbench is live mechanical problems only. Prompts live in `app/services/prompts.py`.
+
+### 2026-09-19 sentence-pipeline-v7.0 implementation
+
+- Full rebuild now runs one Pass 2 call per Part over fixed Python-built source sentences.
+- Pass 3 receives only parents above 18 display units and returns Chinese subsentences plus
+  `end_token_id` values.
+- Selected-Window rebuild is available only after one v7 full rebuild. Its requested Window ranges
+  expand to complete intersecting source sentences, and publication remains atomic.
+- Pass 2 results are checkpointed before Pass 3. A failed full-rebuild Pass 3 retry reuses completed
+  Pass 2 output.
+- No subscription CLI was called for acceptance in this implementation turn. Tests used mocked
+  Pass1/2/3 outputs and the existing dopamine Timed Tokens.
+- Existing dopamine data produced 913 source sentences from 7,604 Tokens, with 240 hidden stage or
+  speaker Tokens and a maximum of 36 visible English words per sentence. The 2:23 omitted-meaning
+  region became four consecutive fixed sentence IDs; the 9:46-10:40 sample respected comma
+  direction and long-pause boundaries.
+- Its two current Parts contain 442 and 471 source sentences; their complete Pass 2 prompt payloads
+  are about 57 KB and 59 KB before provider wrapping. Real CLI response capacity remains for the
+  user's manual full-flow acceptance test.
+- Python simulation verified exact Pass 2 ID coverage and Pass 3 start inference from strictly
+  increasing end IDs without Token gaps or overlaps.
 
 The last broad automated suite run, before the latest Selected-Window payload, progress-detail, and
 Grok-wrapper changes, completed successfully:

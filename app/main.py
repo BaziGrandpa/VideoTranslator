@@ -26,7 +26,7 @@ from app.services.exact_preview import (
     preview_processes,
     render_exact_preview,
 )
-from app.services.subtitle_quality import quality_issues
+from app.services.subtitle_quality import cue_review_problems, describe_review_problems
 from app.services.subtitle_style import default_subtitle_style, merge_subtitle_style
 from app.services.subtitles import validate_segments
 
@@ -77,6 +77,12 @@ class SegmentUpdate(BaseModel):
     source_text: str | None = None
     translated_text: str | None = None
     status: str | None = None
+
+
+class SegmentTimingUpdate(BaseModel):
+    boundary: Literal["start", "end"]
+    value_ms: int | None = Field(default=None, ge=0)
+    delta_ms: Literal[-100, 100] | None = None
 
 
 class SplitRequest(BaseModel):
@@ -143,6 +149,7 @@ class RebuildWindowSelection(BaseModel):
 class SubtitleRebuildRequest(BaseModel):
     mode: Literal["full", "selected"] = "full"
     windows: list[RebuildWindowSelection] = Field(default_factory=list)
+    skip_pass0: bool = False
 
 
 def validate_youtube_url(url: str) -> str:
@@ -184,8 +191,6 @@ def normalize_global_context(payload: GlobalContextUpdate) -> dict:
     for item in payload.terms:
         source = item.source.strip()
         target = item.target.strip()
-        if item.category == "person":
-            target = source
         if not source or not target:
             raise HTTPException(
                 status_code=422,
@@ -200,7 +205,7 @@ def normalize_global_context(payload: GlobalContextUpdate) -> dict:
                 "source": source,
                 "target": target,
                 "category": item.category,
-                "must_use": item.category == "person" or item.must_use,
+                "must_use": item.must_use,
                 "occurrence_count": item.occurrence_count,
             }
         )
@@ -249,6 +254,16 @@ def build_partial_rebuild_scope(
         raise HTTPException(
             status_code=409,
             detail="Selected-Window rebuild requires existing Tokens, Parts, Windows, and Cues",
+        )
+    if any(not repository.list_source_sentences(int(part["id"])) for part in parts):
+        raise HTTPException(
+            status_code=409,
+            detail="Run one full rebuild to create the new source-sentence map before selecting Windows",
+        )
+    if any(not isinstance(segment.get("source_sentence_id"), int) for segment in segments):
+        raise HTTPException(
+            status_code=409,
+            detail="Current Cues predate source-sentence tracking; run one full rebuild first",
         )
     available: dict[int, tuple[dict, dict, int]] = {}
     for part in parts:
@@ -520,7 +535,11 @@ def list_rebuild_windows(project_id: str) -> dict:
     tokens = repository.list_timed_tokens(project_id)
     parts = repository.list_subtitle_parts(project_id)
     if not tokens:
-        return {"parts": [], "selected_rebuild_available": False}
+        return {
+            "parts": [],
+            "selected_rebuild_available": False,
+            "pass0_available": isinstance(project.get("global_translation_context"), dict),
+        }
     result = []
     for part in parts:
         windows = []
@@ -548,7 +567,18 @@ def list_rebuild_windows(project_id: str) -> dict:
                 "windows": windows,
             }
         )
-    return {"parts": result, "selected_rebuild_available": bool(tokens and parts)}
+    sentence_maps_ready = bool(parts) and all(
+        repository.list_source_sentences(int(part["id"])) for part in parts
+    )
+    tracked_segments = repository.list_segments(project_id)
+    segments_ready = bool(tracked_segments) and all(
+        isinstance(segment.get("source_sentence_id"), int) for segment in tracked_segments
+    )
+    return {
+        "parts": result,
+        "selected_rebuild_available": bool(tokens and parts and sentence_maps_ready and segments_ready),
+        "pass0_available": isinstance(project.get("global_translation_context"), dict),
+    }
 
 
 @app.post("/api/projects/{project_id}/rebuild-subtitles")
@@ -562,11 +592,14 @@ def rebuild_subtitles(project_id: str, payload: SubtitleRebuildRequest) -> dict:
         scope = build_partial_rebuild_scope(project, payload.windows)
         repository.begin_partial_rebuild(project_id, scope)
         return repository.enqueue_job(project_id, "partial_rebuild")
+    if payload.skip_pass0 and not isinstance(project.get("global_translation_context"), dict):
+        raise HTTPException(status_code=409, detail="Pass 0 has no existing context to reuse")
     # Rebuild is destructive by design. Clear the previous subtitle pipeline state
     # synchronously so the API response never leaves stale cues visible while the
     # replacement job waits for a worker.
-    repository.clear_subtitle_data(project_id)
-    return repository.enqueue_job(project_id, "rebuild_subtitles")
+    repository.clear_subtitle_data(project_id, preserve_global_context=payload.skip_pass0)
+    job_kind = "rebuild_subtitles_skip_pass0" if payload.skip_pass0 else "rebuild_subtitles"
+    return repository.enqueue_job(project_id, job_kind)
 
 
 @app.get("/api/projects/{project_id}/segments")
@@ -578,91 +611,21 @@ def list_segments(project_id: str) -> list[dict]:
 @app.get("/api/projects/{project_id}/review-issues")
 def list_review_issues(project_id: str) -> list[dict]:
     require_project(project_id)
-    segments = repository.list_segments(project_id)
-    stored = repository.list_review_issues(project_id)
     result: list[dict] = []
-    covered_timing_segment_ids: set[int] = set()
-
-    for issue in stored:
-        start = int(issue["start_token_id"])
-        end = int(issue["end_token_id"])
-        affected = [
-            segment
-            for segment in segments
-            if segment.get("start_token_id") is not None
-            and segment.get("end_token_id") is not None
-            and int(segment["start_token_id"]) <= end
-            and int(segment["end_token_id"]) >= start
-        ]
-        if issue["action"] == "review_timing":
-            covered_timing_segment_ids.update(int(segment["id"]) for segment in affected)
-        replacements = []
-        for replacement in issue["replacement_cues"]:
-            matching = next(
-                (
-                    segment
-                    for segment in segments
-                    if segment.get("start_token_id") == replacement.get("start_token_id")
-                    and segment.get("end_token_id") == replacement.get("end_token_id")
-                ),
-                None,
-            )
-            replacements.append(
-                {
-                    **replacement,
-                    "segment_id": int(matching["id"]) if matching else None,
-                }
-            )
-        result.append(
-            {
-                "id": f"pass3-{issue['id']}",
-                "source": "pass3",
-                "action": issue["action"],
-                "issue_types": issue["issue_types"],
-                "severity": issue["severity"],
-                "reason": issue["reason"],
-                "start_token_id": start,
-                "end_token_id": end,
-                "replacement_cues": replacements,
-                "affected_segment_ids": [int(segment["id"]) for segment in affected],
-                "auto_applied": issue["auto_applied"],
-            }
-        )
-
-    for segment in segments:
-        problems = quality_issues(
-            int(segment["start_ms"]),
-            int(segment["end_ms"]),
-            str(segment["source_text"]),
-            str(segment["translated_text"]),
-        )
-        if not problems or int(segment["id"]) in covered_timing_segment_ids:
+    for segment in repository.list_segments(project_id):
+        problems = cue_review_problems(segment)
+        if not problems:
             continue
-        descriptions = ", ".join(
-            f"{problem['type'].replace('_', ' ')} ({problem['actual']} / {problem['limit']})"
-            for problem in problems
-        )
         result.append(
             {
-                "id": f"quality-{segment['id']}",
-                "source": "quality",
-                "action": "review_timing",
+                "id": f"cue-{segment['id']}",
+                "segment_id": int(segment["id"]),
                 "issue_types": [problem["type"] for problem in problems],
-                "severity": "high"
-                if any(
-                    problem["type"] in {"target_text_too_long", "very_long_duration"}
-                    for problem in problems
-                )
-                else "medium",
-                "reason": f"Manual timing or text adjustment recommended: {descriptions}.",
+                "reason": describe_review_problems(problems),
                 "start_token_id": segment.get("start_token_id"),
                 "end_token_id": segment.get("end_token_id"),
-                "replacement_cues": [],
-                "affected_segment_ids": [int(segment["id"])],
-                "auto_applied": False,
             }
         )
-
     return sorted(
         result,
         key=lambda issue: (
@@ -750,14 +713,48 @@ def update_segment(project_id: str, segment_id: int, payload: SegmentUpdate) -> 
     if current is None:
         raise HTTPException(status_code=404, detail="Subtitle not found")
     fields = payload.model_dump(exclude_unset=True)
-    start_ms = int(fields.get("start_ms", current["start_ms"]))
-    end_ms = int(fields.get("end_ms", current["end_ms"]))
-    if end_ms <= start_ms:
-        raise HTTPException(status_code=422, detail="End time must be later than start time")
+    timing_fields = [field for field in ("start_ms", "end_ms") if field in fields]
+    if len(timing_fields) > 1:
+        raise HTTPException(status_code=422, detail="Update one subtitle boundary at a time")
     try:
+        if timing_fields:
+            field = timing_fields[0]
+            repository.update_segment_boundary(
+                project_id,
+                segment_id,
+                "start" if field == "start_ms" else "end",
+                value_ms=int(fields.pop(field)),
+            )
         return repository.update_segment(project_id, segment_id, **fields)
     except KeyError:
         raise HTTPException(status_code=404, detail="Subtitle not found") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
+@app.patch("/api/projects/{project_id}/segments/{segment_id}/timing")
+def update_segment_timing(
+    project_id: str, segment_id: int, payload: SegmentTimingUpdate
+) -> dict:
+    require_project_not_rendering(project_id)
+    if (payload.value_ms is None) == (payload.delta_ms is None):
+        raise HTTPException(
+            status_code=422,
+            detail="Provide exactly one of value_ms or delta_ms",
+        )
+    try:
+        segments = repository.update_segment_boundary(
+            project_id,
+            segment_id,
+            payload.boundary,
+            value_ms=payload.value_ms,
+            delta_ms=payload.delta_ms,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Subtitle not found") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return {"segments": segments}
 
 
 @app.post("/api/projects/{project_id}/segments/{segment_id}/split")

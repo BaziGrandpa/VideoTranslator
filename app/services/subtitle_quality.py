@@ -6,24 +6,21 @@ from dataclasses import asdict, dataclass
 
 @dataclass(frozen=True)
 class SubtitleQualityRules:
-    preferred_min_ms: int = 1200
-    preferred_max_ms: int = 3500
     max_duration_ms: int = 5000
     short_duration_ms: int = 700
     short_source_words: int = 2
     short_target_units: int = 4
-    preferred_target_units: int = 14
     normal_max_target_units: int = 18
     max_target_units: int = 24
     allowed_over_normal_ratio: float = 0.02
-    max_target_units_per_second: float = 9.0
+    max_target_units_per_second: float = 12.0
 
     def payload(self) -> dict:
         return asdict(self)
 
 
 RULES = SubtitleQualityRules()
-PROMPT_VERSION = "part-review-v6.3"
+PROMPT_VERSION = "sentence-pipeline-v8.2"
 
 
 def target_units(text: str) -> float:
@@ -53,13 +50,66 @@ def quality_issues(start_ms: int, end_ms: int, source: str, target: str) -> list
         add("high_target_reading_speed", units * 1000 / duration, RULES.max_target_units_per_second)
     if units > RULES.max_target_units:
         add("target_text_too_long", units, RULES.max_target_units)
-    elif units > RULES.normal_max_target_units:
-        add("target_text_above_normal_limit", units, RULES.normal_max_target_units)
     return issues
 
 
 def analyze_quality(start_ms: int, end_ms: int, source_text: str, translation: str) -> list[str]:
     return [item["type"] for item in quality_issues(start_ms, end_ms, source_text, translation)]
+
+
+PASS3_INVALID_OUTPUT = "pass3_invalid_output"
+
+
+def stamp_cue_review_flags(segments: list[dict]) -> list[dict]:
+    """Mark review flags once, after a Part's Pass 3 list is final."""
+    stamped: list[dict] = []
+    for segment in segments:
+        item = dict(segment)
+        mechanical = analyze_quality(
+            int(item["start_ms"]),
+            int(item["end_ms"]),
+            str(item.get("source_text", "")),
+            str(item.get("translated_text", "")),
+        )
+        flags = []
+        if PASS3_INVALID_OUTPUT in (segment.get("quality_flags") or []):
+            flags.append(PASS3_INVALID_OUTPUT)
+        flags.extend(kind for kind in mechanical if kind not in flags)
+        item["quality_flags"] = flags
+        item["status"] = "needs_review" if flags else "machine_translated"
+        stamped.append(item)
+    return stamped
+
+
+def cue_review_problems(segment: dict) -> list[dict]:
+    problems = quality_issues(
+        int(segment["start_ms"]),
+        int(segment["end_ms"]),
+        str(segment.get("source_text", "")),
+        str(segment.get("translated_text", "")),
+    )
+    if PASS3_INVALID_OUTPUT in (segment.get("quality_flags") or []):
+        problems.append({"type": PASS3_INVALID_OUTPUT, "actual": 0, "limit": 0})
+    return problems
+
+
+def describe_review_problems(problems: list[dict]) -> str:
+    parts: list[str] = []
+    for problem in problems:
+        kind = problem["type"]
+        actual = problem.get("actual")
+        limit = problem.get("limit")
+        if kind == "target_text_too_long":
+            parts.append(f"Chinese is {actual} display units; the limit is {limit}.")
+        elif kind == "very_short_duration":
+            parts.append(f"Duration {actual} ms is below {limit} ms.")
+        elif kind == "very_long_duration":
+            parts.append(f"Duration {actual} ms exceeds {limit} ms.")
+        elif kind == "high_target_reading_speed":
+            parts.append(f"Reading speed is {actual} units/s; the limit is {limit}.")
+        elif kind == PASS3_INVALID_OUTPUT:
+            parts.append("Pass 3 could not split this cue.")
+    return " ".join(parts)
 
 
 def summarize_length_budget(segments: list[dict]) -> dict:
@@ -84,56 +134,3 @@ def summarize_length_budget(segments: list[dict]) -> dict:
         "within_exception_budget": over_normal <= allowed_over_normal,
     }
 
-
-def editorial_instructions() -> str:
-    return (
-        "YOUR HIGHEST PRIORITY IS LOSSLESS MEANING PRESERVATION!\n"
-        "YOUR PRIMARY TASK IS CHINESE-FIRST CUE SEGMENTATION AND LENGTH CONTROL!\n"
-        "KEEP CHINESE CUES AT OR BELOW 18 DISPLAY UNITS!\n"
-        "SHORT, NATURAL CHINESE CUES ARE YOUR MAIN DELIVERABLE!\n\n"
-        "Treat the corresponding passage in the complete Pass 1 translation as an authoritative "
-        "semantic inventory. Every statement, example, comparison, cause, contrast, list item, "
-        "name, number, qualification and punchline in the Window source and its Pass 1 passage must "
-        "appear exactly once across the output cues. Never shorten, summarize, generalize or drop "
-        "content to satisfy a display-unit limit. Create more cues instead. A short cue that omits "
-        "meaning is invalid even when its Token coverage and length are perfect.\n\n"
-        "Use Chinese punctuation in the Pass 1 passage as the first boundary proposal. Normally "
-        "start with sentence boundaries at 。！？, then consider ；：，、 when a sentence needs more "
-        "cues. Do not split mechanically when that would create an orphaned or unnatural fragment, "
-        "and split further at a natural grammatical boundary when one punctuation-delimited unit is "
-        "still too long. Short adjacent units may be combined only when all meaning remains explicit "
-        "and the resulting cue stays within the length rules.\n\n"
-        "Choose boundaries for the Chinese viewing experience. Divide the Chinese into short, "
-        "natural information units, then align each unit with its contiguous English token range. "
-        "One English sentence may require several cues; English sentence completeness is never a "
-        "reason to keep a long cue. Split explanations, causal clauses, contrasts and enumerations "
-        "where the Chinese remains naturally readable. Shorter cues are welcome; never pad them to "
-        "reach a limit.\n\n"
-        "Keep every cue at or below 18 display units by default. Above 18 and at or below 24 is a "
-        "VERY RARE exception allowed only when a shorter split would damage a genuinely indivisible "
-        "name, product model or fixed expression. Aim for no more than 2% of cues above 18. This is "
-        "not a quota to fill. NEVER OUTPUT A CUE ABOVE 24 DISPLAY UNITS. Wide characters, including "
-        "Chinese and full-width punctuation, count as 1; other non-space characters count as 0.5; "
-        "spaces do not count.\n\n"
-        "Use the complete Part translation as the basis. Local rephrasing is allowed only for a "
-        "natural boundary adjustment; it must not remove, compress or generalize any semantic item. "
-        "Preserve all meaning, facts, names, numbers, negation, tone and logical connections. Do not "
-        "summarize, omit, duplicate or invent information. Each cue's Chinese must correspond to its "
-        "own source range in context; neighboring cues may express one meaning group without matching "
-        "word for word.\n\n"
-        "Protect actual indivisible names, product models and fixed expressions. Do not treat every "
-        "noun phrase or verb phrase as indivisible. Avoid isolated particles such as 呢/了/的/吗/吧 "
-        "and orphaned words that clearly belong with a neighboring phrase. Preserve real person names "
-        "in their original Latin spelling and follow approved global terminology.\n\n"
-        "CHINESE-FIRST EXAMPLE:\n"
-        "GOOD: All to answer the question, / does more dopamine make life more exciting?\n"
-        "ZH: 这一切都是为了回答： / 更多多巴胺，会让生活更刺激吗？\n"
-        "BAD: The other ones I wasn't so lucky, but I still went in, got my money, and felt like "
-        "I accomplished something pretty epic. -> 后面几张我没那么幸运，但我还是拿回了钱，"
-        "感觉完成了件了不起的事\n"
-        "GOOD: The other ones I wasn't so lucky, / but I still went in, got my money, / and felt "
-        "like I accomplished something pretty epic.\n"
-        "ZH: 后面几张我没那么幸运 / 但我还是拿回了钱 / 感觉完成了件挺了不起的事\n"
-        "Assign each Chinese unit its corresponding source Token range. The example demonstrates "
-        "granularity, not a fixed number of cues.\n\n"
-    )

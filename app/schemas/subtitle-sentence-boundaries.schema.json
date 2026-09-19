@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "sentences": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "source_sentence_id": { "type": "integer" },
+          "boundaries": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "properties": {
+                "subsentence_id": { "type": "integer" },
+                "end_token_id": { "type": "integer" }
+              },
+              "required": ["subsentence_id", "end_token_id"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["source_sentence_id", "boundaries"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["sentences"],
+  "additionalProperties": false
+}

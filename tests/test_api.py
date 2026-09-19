@@ -43,6 +43,75 @@ def test_create_project_and_edit_segment(tmp_path: Path, monkeypatch) -> None:
     assert edited.json()["translated_text"] == "Edited translation"
 
 
+def test_timing_updates_share_neighbor_boundaries_and_reject_zero_duration(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = tmp_path / "api.db"
+    init_db(database)
+    repository = Repository(database)
+    monkeypatch.setattr(main_module, "repository", repository)
+    client = TestClient(main_module.app)
+    project = repository.create_project("https://youtu.be/example")
+    repository.replace_segments(
+        project["id"],
+        [
+            {"start_ms": 1000, "end_ms": 2000, "source_text": "One", "translated_text": "一"},
+            {"start_ms": 2000, "end_ms": 3000, "source_text": "Two", "translated_text": "二"},
+            {
+                "start_ms": 3000,
+                "end_ms": 4000,
+                "source_text": "Three",
+                "translated_text": "三",
+            },
+        ],
+    )
+    first, second, third = repository.list_segments(project["id"])
+
+    moved_start = client.patch(
+        f"/api/projects/{project['id']}/segments/{second['id']}/timing",
+        json={"boundary": "start", "value_ms": 2200},
+    )
+    assert moved_start.status_code == 200
+    saved = repository.list_segments(project["id"])
+    assert saved[0]["end_ms"] == 2200
+    assert saved[1]["start_ms"] == 2200
+
+    nudged_start = client.patch(
+        f"/api/projects/{project['id']}/segments/{second['id']}/timing",
+        json={"boundary": "start", "delta_ms": -100},
+    )
+    assert nudged_start.status_code == 200
+    saved = repository.list_segments(project["id"])
+    assert saved[0]["end_ms"] == 2100
+    assert saved[1]["start_ms"] == 2100
+
+    moved_end = client.patch(
+        f"/api/projects/{project['id']}/segments/{second['id']}",
+        json={"end_ms": 3200},
+    )
+    assert moved_end.status_code == 200
+    saved = repository.list_segments(project["id"])
+    assert saved[1]["end_ms"] == 3200
+    assert saved[2]["start_ms"] == 3200
+
+    invalid_start = client.patch(
+        f"/api/projects/{project['id']}/segments/{second['id']}/timing",
+        json={"boundary": "start", "value_ms": first["start_ms"]},
+    )
+    assert invalid_start.status_code == 422
+    invalid_end = client.patch(
+        f"/api/projects/{project['id']}/segments/{second['id']}/timing",
+        json={"boundary": "end", "value_ms": third["end_ms"]},
+    )
+    assert invalid_end.status_code == 422
+    unchanged = repository.list_segments(project["id"])
+    assert [(item["start_ms"], item["end_ms"]) for item in unchanged] == [
+        (1000, 2100),
+        (2100, 3200),
+        (3200, 4000),
+    ]
+
+
 def test_rejects_non_youtube_url(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "api.db"
     init_db(database)
@@ -174,23 +243,6 @@ def test_rebuild_clears_old_subtitle_state_before_queueing(tmp_path: Path, monke
         ],
         "codex",
     )
-    repository.replace_part_review_issues(
-        project["id"],
-        part["id"],
-        [
-            {
-                "issue_id": "old-issue",
-                "action": "review_timing",
-                "severity": "low",
-                "issue_types": ["timing"],
-                "reason": "Old review issue",
-                "start_token_id": 0,
-                "end_token_id": 0,
-                "replacement_cues": [],
-            }
-        ],
-    )
-
     response = client.post(f"/api/projects/{project['id']}/rebuild-subtitles", json={})
 
     assert response.status_code == 200
@@ -211,7 +263,67 @@ def test_rebuild_clears_old_subtitle_state_before_queueing(tmp_path: Path, monke
     assert rebuilt["video_path"] == str(video_path)
 
 
-def test_review_issues_include_pass3_suggestions_and_current_quality_flags(
+def test_full_rebuild_can_preserve_existing_pass0_context(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "api.db"
+    init_db(database)
+    repository = Repository(database)
+    monkeypatch.setattr(main_module, "repository", repository)
+    client = TestClient(main_module.app)
+    project = repository.create_project("https://youtu.be/example")
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    context = {"overview": "Existing context", "style": "Natural", "terms": []}
+    repository.update_project(
+        project["id"],
+        video_path=str(video),
+        global_translation_context=context,
+        global_context_provider="codex",
+        global_context_approved=1,
+        status="waiting_review",
+    )
+
+    availability = client.get(f"/api/projects/{project['id']}/rebuild-windows")
+    assert availability.status_code == 200
+    assert availability.json()["pass0_available"] is True
+
+    response = client.post(
+        f"/api/projects/{project['id']}/rebuild-subtitles",
+        json={"mode": "full", "skip_pass0": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["kind"] == "rebuild_subtitles_skip_pass0"
+    rebuilt = repository.get_project(project["id"])
+    assert rebuilt["global_translation_context"] == context
+    assert rebuilt["global_context_provider"] == "codex"
+    assert rebuilt["global_context_approved"] is True
+
+
+def test_full_rebuild_rejects_skip_pass0_without_existing_context(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = tmp_path / "api.db"
+    init_db(database)
+    repository = Repository(database)
+    monkeypatch.setattr(main_module, "repository", repository)
+    client = TestClient(main_module.app)
+    project = repository.create_project("https://youtu.be/example")
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    repository.update_project(
+        project["id"], video_path=str(video), status="waiting_review"
+    )
+
+    response = client.post(
+        f"/api/projects/{project['id']}/rebuild-subtitles",
+        json={"mode": "full", "skip_pass0": True},
+    )
+
+    assert response.status_code == 409
+    assert "no existing context" in response.json()["detail"]
+
+
+def test_review_issues_are_live_cue_problems_without_severity(
     tmp_path: Path, monkeypatch
 ) -> None:
     database = tmp_path / "api.db"
@@ -243,51 +355,34 @@ def test_review_issues_include_pass3_suggestions_and_current_quality_flags(
                 "start_ms": 0,
                 "end_ms": 7000,
                 "start_token_id": 0,
-                "end_token_id": 2,
+                "end_token_id": 0,
                 "source_text": "I just did something crazy.",
-                "translated_text": "那双700美元的鞋还在袋子里",
-                "quality_flags": ["very_long_duration"],
+                "translated_text": "我刚做了一件疯狂的事",
+            },
+            {
+                "start_ms": 7000,
+                "end_ms": 8200,
+                "start_token_id": 1,
+                "end_token_id": 2,
+                "source_text": "Hello there.",
+                "translated_text": "你好",
+                "quality_flags": ["pass3_invalid_output"],
                 "status": "needs_review",
-            }
+            },
         ],
         "codex",
-    )
-    repository.replace_batch_review_issues(
-        project["id"],
-        part["id"],
-        batch["id"],
-        [
-            {
-                "issue_id": "possible-shift",
-                "action": "suggest_translation",
-                "severity": "high",
-                "issue_types": ["possible_semantic_misalignment"],
-                "reason": "The nearby Chinese meanings may be shifted.",
-                "start_token_id": 0,
-                "end_token_id": 2,
-                "replacement_cues": [
-                    {
-                        "start_token_id": 0,
-                        "end_token_id": 2,
-                        "translation": "我刚做了一件疯狂的事",
-                    }
-                ],
-                "auto_applied": False,
-            }
-        ],
     )
 
     response = TestClient(main_module.app).get(f"/api/projects/{project['id']}/review-issues")
 
     assert response.status_code == 200
     issues = response.json()
-    semantic = next(issue for issue in issues if issue["source"] == "pass3")
-    quality = next(issue for issue in issues if issue["source"] == "quality")
-    segment = repository.list_segments(project["id"])[0]
-    assert semantic["replacement_cues"][0]["segment_id"] == segment["id"]
-    assert semantic["replacement_cues"][0]["translation"] == "我刚做了一件疯狂的事"
-    assert semantic["affected_segment_ids"] == [segment["id"]]
-    assert "very_long_duration" in quality["issue_types"]
+    assert all("severity" not in issue for issue in issues)
+    assert all("replacement_cues" not in issue for issue in issues)
+    by_type = {issue["issue_types"][0]: issue for issue in issues}
+    assert "very_long_duration" in by_type
+    assert "pass3_invalid_output" in by_type
+    assert by_type["pass3_invalid_output"]["reason"] == "Pass 3 could not split this cue."
 
 
 def test_exact_preview_returns_ffmpeg_frame(tmp_path: Path, monkeypatch) -> None:
@@ -473,9 +568,9 @@ def test_pass0_context_can_be_edited_and_approved_before_translation(
     assert approved_project["global_context_approved"] is True
     assert approved_project["global_translation_context"]["terms"][0] == {
         "source": "Katie",
-        "target": "Katie",
+        "target": "凯蒂",
         "category": "person",
-        "must_use": True,
+        "must_use": False,
         "occurrence_count": 0,
     }
 

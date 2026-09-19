@@ -122,14 +122,6 @@
               <div class="timing-panel">
                 <div class="timing-row">
                   <button id="scroll-to-active">Scroll to current subtitle</button>
-                  <button id="set-start">Set start to current time</button>
-                  <button id="set-end">Set end to current time</button>
-                  <button id="nudge-back">Shift −100 ms</button>
-                  <button id="nudge-forward">Shift +100 ms</button>
-                </div>
-                <div class="timing-row">
-                  <button id="split-segment">Split at current time</button>
-                  <button id="merge-segment">Merge with next</button>
                   <label class="loop-control"><input id="loop-current" type="checkbox" /> Loop selected subtitle</label>
                   <span id="save-state" class="save-state">Saved</span>
                 </div>
@@ -283,6 +275,10 @@
         <div id="rebuild-full-warning" class="rebuild-warning hidden">
           Full rebuild clears the current Pass 0 context, Tokens, Parts, Cues, timing edits, and review issues as soon as you confirm. The downloaded video and source captions remain.
         </div>
+        <label id="rebuild-skip-pass0-option" class="rebuild-skip-option hidden">
+          <input type="checkbox" id="rebuild-skip-pass0" />
+          <span><strong>Skip Pass 0</strong><small>Reuse the current global translation context and its approval state.</small></span>
+        </label>
         <div id="rebuild-dialog-error" class="error-box hidden"></div>
         <div class="dialog-actions">
           <button type="button" id="cancel-rebuild-dialog">Cancel</button>

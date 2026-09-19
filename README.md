@@ -11,9 +11,10 @@ A local-first workbench for translating and burning subtitles into YouTube video
 5. Split long videos into balanced, natural-boundary parts of about 30 minutes.
 6. Generate project-wide translation guidance and pause for the user to review its overview,
    style, and preferred terminology.
-7. After approval, let the local Codex CLI translate each complete Part and create timed
-   1,000-token subtitle windows, with Grok Build fallback.
-8. Save every completed window to SQLite so interrupted or quota-limited runs resume in place.
+7. After approval, translate each complete Part (Pass 1), map that Chinese onto Python-cut
+   English cues (Pass 2), and split Chinese above 24 display units (Pass 3), with Grok Build
+   fallback.
+8. Checkpoint completed Parts in SQLite so interrupted or quota-limited runs resume in place.
 9. Normalize display text and validate exact token coverage, timing, duration, and reading speed.
 10. Review both languages and adjust subtitle timing in the browser.
 11. Confirm the timeline, then use FFmpeg to add gradient masks and burn styled ASS subtitles.
@@ -180,42 +181,39 @@ node --check app/static/app.js
 
 ## Current scope
 
-Subtitle generation uses shared rules in `app/services/subtitle_quality.py` for prompt guidance
-and Python validation. Cue boundaries prioritize natural Chinese information units; English cue
-text may be a clause or other incomplete fragment as long as Token coverage and translation
-alignment remain exact. Chinese targets normally stay at or below 18 display units. The 19-24
-range is a rare phrase-integrity exception, capped at roughly 2% of Cues; above 24 is unacceptable.
+Python first divides each Part into fixed `source_sentence_id` ranges using English punctuation,
+speaker changes, and word-level pauses. Short comma/colon/semicolon fragments merge right; short
+complete sentences normally merge left. A 1,200 ms pause prevents merging. Known stage directions
+and speaker markers retain their Token IDs but are hidden from visible subtitles.
 
-Pass 2's primary job is Chinese-first segmentation. It makes one generation call per approximately
-1,000-Token Window, receives `[token_id,text]` pairs with no timing data, and has no repair loop.
-Invalid Token coverage fails that Window. After all Windows in a Part are saved, Pass 3 reviews the
-complete Part in one CLI call. Pass 3 has exactly three issue types: `too_long`,
-`semantic_mismatch`, and `terminology_inconsistency`. A structurally valid `too_long` replacement
-is auto-applied; empty or invalid replacements remain visible for human review. Semantic and
-terminology issues are marked without automatic rewriting. Python alone computes duration and
-reading-speed flags after Pass 3 and exposes them in the workbench.
+Pass 2 makes one call for the complete Part. It receives ordered IDs and clean English, the full
+Pass 1 translation, and project context, but no word-level Token IDs or timestamps. It places the
+Pass 1 Chinese back onto those English cues. Adjacent cues must stay one unfolding thought:
+concatenating their Chinese should recover Pass 1, without extra, missing, or repeated facts.
+Python rejects missing, duplicate, reordered, or empty ID rows.
+
+Python sends only Chinese parents above 24 display units to Pass 3. If Chinese punctuation can
+split a parent, Python does that first and Pass 3-1 only fills `end_token_id`. Otherwise Pass 3-2
+splits the Chinese and assigns ends. Prefer 18 display units when already splitting; 24 is the hard
+max. Python infers every start, requires strictly increasing ends and exact parent coverage, then
+stamps length, duration, and reading-speed flags once on the Part's final cues. Pass 3 does not
+perform semantic or terminology auditing.
+
+The review workbench lists cues that are over 24 units, shorter than 700 ms, longer than 5000 ms,
+faster than 12 units/s, or that Pass 3 failed to split. There is no severity and no Apply
+suggestion path.
 
 Generation, context, Part-level review requests, parsed provider responses, validation errors and
 final results are recorded under each project's `artifacts/translation-audit/`. Records include
 the prompt version, requested model and provider (CLI-default models are not inferred).
 
-To test one saved Window through Pass 2 and Pass 3 without writing SQLite:
-
-```powershell
-.\.venv\Scripts\python.exe -m scripts.validate_review_window `
-  --project-id PROJECT_UUID --part 1 --window 1
-```
-
-The report and raw audit records are written under `artifacts/targeted-window-tests/`.
-
 The browser Rebuild dialog supports two modes. Full rebuild preserves the existing destructive
 behavior and clears the old subtitle pipeline state immediately. Selected Windows reuses the
-existing Timed Tokens and immutable Part/Window Token envelopes. It reruns Pass 0 for the whole
-video, pauses for Pass 0 approval, reruns Pass 1 once per affected Part, Pass 2 once per selected
-Window, and Pass 3 once per affected Part. Pass 3 receives the complete Part as context but Python
-allows issues and replacements only inside the selected Token ranges; replacements may never cross
-a Window boundary. Existing subtitles stay visible and read-only until every selected result is
-ready, then all affected Parts are published in one database transaction. A revision guard prevents
+existing Timed Tokens and legacy Part/Window selection envelopes. A project must complete one new
+full rebuild before Selected Windows is available. Python expands the selection to complete
+intersecting source sentences. Pass 2 reads the complete Part and existing unselected Chinese but
+returns only the selected IDs; Pass 3 splits only selected long parents. Existing subtitles stay
+visible and read-only until all affected Parts are atomically published. A revision guard prevents
 manual edits made during processing from being overwritten.
 
 To regenerate an idle project's subtitles while retaining its tokens and part contexts:

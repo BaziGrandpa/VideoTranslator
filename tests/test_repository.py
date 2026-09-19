@@ -90,6 +90,8 @@ def test_persists_timed_tokens_and_segment_token_ranges(tmp_path: Path) -> None:
                 "end_ms": 900,
                 "start_token_id": 0,
                 "end_token_id": 1,
+                "source_sentence_id": 1,
+                "sub_id": 1,
                 "source_text": "Hello world.",
                 "translated_text": "Translated greeting",
                 "quality_flags": ["very_short_duration"],
@@ -102,7 +104,49 @@ def test_persists_timed_tokens_and_segment_token_ranges(tmp_path: Path) -> None:
     assert [token["text"] for token in tokens] == ["Hello", "world."]
     assert segment["start_token_id"] == 0
     assert segment["end_token_id"] == 1
+    assert segment["source_sentence_id"] == 1
+    assert segment["sub_id"] == 1
     assert segment["quality_flags"] == ["very_short_duration"]
+
+
+def test_persists_source_sentence_map(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path)
+    project = repository.create_project("https://youtu.be/example")
+    repository.initialize_subtitle_plan(
+        project["id"],
+        [
+            {
+                "start_token_id": 0,
+                "end_token_id": 2,
+                "start_ms": 0,
+                "end_ms": 900,
+                "windows": [(0, 2)],
+            }
+        ],
+        600,
+    )
+    part = repository.list_subtitle_parts(project["id"])[0]
+    repository.replace_source_sentences(
+        project["id"],
+        part["id"],
+        [
+            {
+                "source_sentence_id": 1,
+                "start_token_id": 0,
+                "end_token_id": 2,
+                "start_ms": 100,
+                "end_ms": 900,
+                "source_sentence": "Hello there.",
+                "chinese_sentence": "你好。",
+                "hidden_token_ids": [0],
+            }
+        ],
+    )
+
+    sentences = repository.list_source_sentences(part["id"])
+    assert sentences[0]["source_sentence_id"] == 1
+    assert sentences[0]["chinese_sentence"] == "你好。"
+    assert sentences[0]["hidden_token_ids"] == [0]
 
 
 def test_persists_resumable_part_and_batch_checkpoint(tmp_path: Path) -> None:

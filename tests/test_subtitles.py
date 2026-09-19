@@ -29,6 +29,8 @@ def test_normalizes_chinese_display_text_and_stage_directions() -> None:
     assert normalize_translated_text("全新的 45A Ferrari，真的很酷。") == (
         "全新的45A Ferrari，真的很酷"
     )
+    assert normalize_translated_text("——今天开始——") == "今天开始"
+    assert normalize_translated_text("—今天——开始。") == "今天——开始"
     assert normalize_source_text("because I'm cute. >> [snorts] >>") == "because I'm cute."
 
 

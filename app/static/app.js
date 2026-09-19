@@ -518,23 +518,11 @@ function createGlobalContextTermRow(term = {}) {
   mustUse.checked = Boolean(term.must_use);
   mustUseLabel.append(mustUse);
 
-  const enforcePersonName = () => {
-    const isPerson = category.value === "person";
-    target.disabled = isPerson;
-    target.title = isPerson ? "Person names remain in their original spelling" : "";
-    if (isPerson) {
-      target.value = source.value;
-      mustUse.checked = true;
-    }
-  };
   source.addEventListener("input", () => {
-    if (category.value === "person") target.value = source.value;
     row.dataset.occurrenceCount = "0";
     occurrence.textContent = "Edited";
     occurrence.title = "Source changed after Pass 0; occurrence count was cleared";
   });
-  category.addEventListener("change", enforcePersonName);
-  enforcePersonName();
 
   const remove = document.createElement("button");
   remove.className = "remove-context-term";
@@ -759,12 +747,13 @@ async function loadSegments() {
 
 function renderSegments() {
   const reviewed = state.segments.filter((segment) => segment.status === "reviewed").length;
-  const flagged = state.segments.filter((segment) => segment.status === "needs_review").length;
+  const flaggedIds = new Set(state.reviewIssues.map((issue) => issue.segment_id));
+  const flagged = flaggedIds.size;
   $("#segment-summary").textContent = state.reviewMode
     ? `${state.reviewIssues.length} issues · all review states`
     : `${reviewed}/${state.segments.length} reviewed${flagged ? ` · ${flagged} need attention` : ""}`;
   $(".subtitle-table-head span:nth-child(2)").textContent = state.reviewMode
-    ? "English / Current translation / Suggestion"
+    ? "English / Current translation / Review note"
     : "English / Translation";
   const list = $("#segment-list");
   if (state.reviewMode) {
@@ -773,11 +762,7 @@ function renderSegments() {
   }
   list.innerHTML = state.segments.map((segment) => `
     <div class="segment-row ${segment.id === state.selectedId ? "selected" : ""} ${segment.id === state.activeId ? "active" : ""}" data-id="${segment.id}">
-      <div class="time-fields">
-        <input class="start-time" aria-label="Start time" value="${formatTime(segment.start_ms)}" />
-        <input class="end-time" aria-label="End time" value="${formatTime(segment.end_ms)}" />
-        ${segment.status === "needs_review" ? `<span class="quality-warning" title="${escapeHtml((segment.quality_flags || []).map((flag) => flag.replaceAll("_", " ")).join(", "))}">Check readability</span>` : ""}
-      </div>
+      ${timeFieldsMarkup(segment, flaggedIds.has(segment.id))}
       <div class="text-fields">
         <textarea class="source" aria-label="English subtitle">${escapeHtml(segment.source_text)}</textarea>
         <textarea class="translation" aria-label="Translated subtitle">${escapeHtml(segment.translated_text)}</textarea>
@@ -788,7 +773,7 @@ function renderSegments() {
   list.querySelectorAll(".segment-row").forEach((row) => {
     const id = Number(row.dataset.id);
     row.addEventListener("click", (event) => {
-      if (!event.target.matches("input,textarea")) selectSegment(id, true);
+      if (!event.target.matches("input,textarea,button")) selectSegment(id, true);
       else selectSegment(id, false);
     });
     for (const [selector, field] of [[".source", "source_text"], [".translation", "translated_text"]]) {
@@ -801,69 +786,44 @@ function renderSegments() {
         void saveSegmentText(id, field, event.target.value);
       });
     }
-    row.querySelector(".start-time").addEventListener("change", (event) => saveTimeInput(id, "start_ms", event.target));
-    row.querySelector(".end-time").addEventListener("change", (event) => saveTimeInput(id, "end_ms", event.target));
+    bindTimingControls(row, id);
     row.querySelector(".reviewed").addEventListener("change", (event) => saveSegment(id, { status: event.target.checked ? "reviewed" : "edited" }, true));
   });
 }
 
 function issueLabel(issue) {
-  if (issue.auto_applied) return "Auto-applied boundary fix";
-  if ((issue.issue_types || []).includes("too_long")) return "Overlong cue review";
-  if ((issue.issue_types || []).includes("semantic_mismatch")) return "Semantic review";
-  if ((issue.issue_types || []).includes("terminology_inconsistency")) return "Terminology review";
-  if (issue.action === "review_timing") return "Timing review";
-  return "Translation suggestion";
-}
-
-function replacementForSegment(issue, segment) {
-  if (!issue || !segment) return null;
-  return (issue.replacement_cues || []).find(
-    (replacement) => replacement.segment_id === segment.id,
-  ) || null;
+  const types = issue.issue_types || [];
+  if (types.includes("pass3_invalid_output")) return "Pass 3 split failed";
+  if (types.includes("target_text_too_long")) return "Overlong cue";
+  if (types.includes("very_long_duration")) return "Long duration";
+  if (types.includes("very_short_duration")) return "Short duration";
+  if (types.includes("high_target_reading_speed")) return "Fast reading speed";
+  return "Needs review";
 }
 
 function renderReviewIssues(list) {
   list.innerHTML = state.reviewIssues.map((issue) => {
-    const affected = (issue.affected_segment_ids || [])
-      .map((id) => state.segments.find((segment) => segment.id === id))
-      .filter(Boolean);
-    const rows = affected.map((segment) => {
-      const replacement = replacementForSegment(issue, segment);
-      const applied = replacement
-        && segment.translated_text.trim() === String(replacement.translation || "").trim();
-      const suggestion = replacement
-        ? escapeHtml(replacement.translation)
-        : escapeHtml(issue.reason);
-      const applyButton = replacement && issue.action === "suggest_translation" && !issue.auto_applied
-        ? `<button class="apply-suggestion" type="button" data-issue-id="${escapeHtml(issue.id)}" data-segment-id="${segment.id}" ${applied ? "disabled" : ""}>${applied ? "Applied" : "Apply"}</button>`
-        : "";
-      return `
+    const segment = state.segments.find((item) => item.id === issue.segment_id);
+    const row = segment ? `
         <div class="segment-row review-issue-row ${segment.id === state.selectedId ? "selected" : ""}" data-id="${segment.id}" data-issue-id="${escapeHtml(issue.id)}">
-          <div class="time-fields">
-            <input class="start-time" aria-label="Start time" value="${formatTime(segment.start_ms)}" />
-            <input class="end-time" aria-label="End time" value="${formatTime(segment.end_ms)}" />
-          </div>
+          ${timeFieldsMarkup(segment, false)}
           <div class="text-fields review-text-fields">
             <textarea class="source" aria-label="English subtitle" readonly>${escapeHtml(segment.source_text)}</textarea>
             <textarea class="translation" aria-label="Current translated subtitle">${escapeHtml(segment.translated_text)}</textarea>
-            <div class="suggestion-row ${replacement ? "" : "diagnostic"}">
-              <div class="suggestion-text"><span class="suggestion-label">${replacement ? "Suggested" : "Review note"}</span>${suggestion}</div>
-              ${applyButton}
+            <div class="suggestion-row diagnostic">
+              <div class="suggestion-text"><span class="suggestion-label">Review note</span>${escapeHtml(issue.reason)}</div>
             </div>
           </div>
           <label class="review-check"><input class="reviewed" type="checkbox" ${segment.status === "reviewed" ? "checked" : ""} aria-label="Reviewed" /></label>
-        </div>`;
-    }).join("");
+        </div>` : `<div class="review-issue-missing">The original cue boundaries have changed.</div>`;
     return `
-      <section class="review-issue ${issue.auto_applied ? "auto-applied" : ""}" data-issue-id="${escapeHtml(issue.id)}">
+      <section class="review-issue" data-issue-id="${escapeHtml(issue.id)}">
         <div class="review-issue-head">
           <span class="issue-kind">${escapeHtml(issueLabel(issue))}</span>
-          <span class="issue-severity ${escapeHtml(issue.severity)}">${escapeHtml(issue.severity)}</span>
           <span class="issue-types">${escapeHtml((issue.issue_types || []).map((value) => value.replaceAll("_", " ")).join(" · "))}</span>
           <p>${escapeHtml(issue.reason)}</p>
         </div>
-        ${rows || `<div class="review-issue-missing">The original cue boundaries have changed. The issue is retained for audit.</div>`}
+        ${row}
       </section>`;
   }).join("");
 
@@ -881,30 +841,47 @@ function renderReviewIssues(list) {
       event.preventDefault();
       void saveSegmentText(id, "translated_text", event.target.value);
     });
-    row.querySelector(".start-time").addEventListener("change", (event) => saveTimeInput(id, "start_ms", event.target));
-    row.querySelector(".end-time").addEventListener("change", (event) => saveTimeInput(id, "end_ms", event.target));
+    bindTimingControls(row, id);
     row.querySelector(".reviewed").addEventListener("change", (event) => saveSegment(id, { status: event.target.checked ? "reviewed" : "edited" }, true));
-  });
-  list.querySelectorAll(".apply-suggestion").forEach((button) => {
-    button.addEventListener("click", () => void applyReviewSuggestion(button));
   });
 }
 
-async function applyReviewSuggestion(button) {
-  if (!(await flushPendingSegmentSaves())) return;
-  const issue = state.reviewIssues.find((item) => item.id === button.dataset.issueId);
-  const segmentId = Number(button.dataset.segmentId);
-  const segment = state.segments.find((item) => item.id === segmentId);
-  const replacement = segment && replacementForSegment(issue, segment);
-  if (!replacement) return showToast("This suggestion no longer matches the current cue boundaries");
-  button.disabled = true;
-  const saved = await saveSegment(
-    segmentId,
-    { translated_text: replacement.translation, status: "edited" },
-    true,
-  );
-  if (saved) showToast("Suggestion applied and saved");
-  else button.disabled = false;
+function timeFieldsMarkup(segment, showWarning) {
+  const issue = state.reviewIssues.find((item) => item.segment_id === segment.id);
+  const warning = showWarning && issue
+    ? `<span class="quality-warning" title="${escapeHtml((issue.issue_types || []).map((flag) => flag.replaceAll("_", " ")).join(", "))}">Check readability</span>`
+    : "";
+  return `
+    <div class="time-fields">
+      <div class="time-field-row">
+        <input class="start-time" aria-label="Start time" value="${formatTime(segment.start_ms)}" />
+        <button class="time-adjust" type="button" data-boundary="start" data-delta="-100" aria-label="Move start 100 milliseconds earlier" title="Start −100 ms">−</button>
+        <button class="time-adjust" type="button" data-boundary="start" data-delta="100" aria-label="Move start 100 milliseconds later" title="Start +100 ms">+</button>
+      </div>
+      <div class="time-field-row">
+        <input class="end-time" aria-label="End time" value="${formatTime(segment.end_ms)}" />
+        <button class="time-adjust" type="button" data-boundary="end" data-delta="-100" aria-label="Move end 100 milliseconds earlier" title="End −100 ms">−</button>
+        <button class="time-adjust" type="button" data-boundary="end" data-delta="100" aria-label="Move end 100 milliseconds later" title="End +100 ms">+</button>
+      </div>
+      ${warning}
+    </div>`;
+}
+
+function bindTimingControls(row, id) {
+  row.querySelector(".start-time").addEventListener("change", (event) => {
+    void saveTimeInput(id, "start", event.target);
+  });
+  row.querySelector(".end-time").addEventListener("change", (event) => {
+    void saveTimeInput(id, "end", event.target);
+  });
+  row.querySelectorAll(".time-adjust").forEach((button) => {
+    button.addEventListener("click", () => {
+      void updateCueTiming(id, {
+        boundary: button.dataset.boundary,
+        delta_ms: Number(button.dataset.delta),
+      });
+    });
+  });
 }
 
 function editSegmentText(id, field, value) {
@@ -969,15 +946,61 @@ async function saveSegmentText(id, field, value) {
   }
 }
 
-async function saveTimeInput(id, field, input) {
+async function saveTimeInput(id, boundary, input) {
+  const segment = state.segments.find((item) => item.id === id);
+  const field = boundary === "start" ? "start_ms" : "end_ms";
+  if (!segment) return;
   try {
     const value = parseTime(input.value);
-    await saveSegment(id, { [field]: value, status: "edited" }, true);
+    await updateCueTiming(id, { boundary, value_ms: value });
   } catch (error) {
     showToast(error.message);
-    const segment = state.segments.find((item) => item.id === id);
     input.value = formatTime(segment[field]);
   }
+}
+
+function applyTimingSegments(segments) {
+  for (const updated of segments) {
+    const index = state.segments.findIndex((item) => item.id === updated.id);
+    if (index >= 0) state.segments[index] = updated;
+  }
+}
+
+function updateCueTiming(id, payload) {
+  const projectId = state.project.id;
+  const previous = state.timingChangeQueue || Promise.resolve();
+  const task = previous.catch(() => {}).then(async () => {
+    try {
+      const result = await api(`/api/projects/${projectId}/segments/${id}/timing`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+      if (state.project?.id === projectId) {
+        applyTimingSegments(result.segments || []);
+        state.segmentSaveFailed = false;
+        renderSegments();
+        updatePreview();
+        showToast("Timing updated");
+      }
+      return true;
+  } catch (error) {
+    if (state.project?.id === projectId) {
+      state.segmentSaveFailed = false;
+      renderSegments();
+    }
+      showToast(error.message);
+      return false;
+    }
+  });
+  state.timingChangeQueue = task;
+  state.pendingSaves.add(task);
+  task.finally(() => {
+    state.pendingSaves.delete(task);
+    if (state.timingChangeQueue === task) state.timingChangeQueue = null;
+    updateSegmentSaveState();
+  });
+  updateSegmentSaveState();
+  return task;
 }
 
 function saveSegment(id, patch, rerender = false) {
@@ -1110,41 +1133,6 @@ function startVideoSync() {
   else requestAnimationFrame(tick);
 }
 
-async function adjustSelected(kind, amount = 0) {
-  if (!(await flushPendingSegmentSaves())) return;
-  const segment = selectedSegment();
-  if (!segment) return showToast("Select a subtitle first");
-  const videoMs = Math.round($("#video").currentTime * 1000);
-  let patch;
-  if (kind === "start") patch = { start_ms: videoMs, status: "edited" };
-  else if (kind === "end") patch = { end_ms: videoMs, status: "edited" };
-  else patch = { start_ms: Math.max(0, segment.start_ms + amount), end_ms: Math.max(1, segment.end_ms + amount), status: "edited" };
-  await saveSegment(segment.id, patch, true);
-}
-
-async function splitSelected() {
-  if (!(await flushPendingSegmentSaves())) return;
-  const segment = selectedSegment();
-  if (!segment) return showToast("Select a subtitle first");
-  try {
-    await api(`/api/projects/${state.project.id}/segments/${segment.id}/split`, {
-      method: "POST",
-      body: JSON.stringify({ at_ms: Math.round($("#video").currentTime * 1000) }),
-    });
-    await loadSegments();
-  } catch (error) { showToast(error.message); }
-}
-
-async function mergeSelected() {
-  if (!(await flushPendingSegmentSaves())) return;
-  const segment = selectedSegment();
-  if (!segment) return showToast("Select a subtitle first");
-  try {
-    await api(`/api/projects/${state.project.id}/segments/${segment.id}/merge-next`, { method: "POST", body: "{}" });
-    await loadSegments();
-  } catch (error) { showToast(error.message); }
-}
-
 async function approveAndRender() {
   if (!state.project || projectIsRenderLocked()) return;
   const projectId = state.project.id;
@@ -1202,6 +1190,7 @@ function updateRebuildDialog() {
   const selected = [...document.querySelectorAll(".rebuild-window-input:checked")];
   $("#rebuild-window-panel").classList.toggle("hidden", mode !== "selected");
   $("#rebuild-full-warning").classList.toggle("hidden", mode !== "full");
+  $("#rebuild-skip-pass0-option").classList.toggle("hidden", mode !== "full");
   $("#rebuild-selection-summary").textContent = `${selected.length} Window${selected.length === 1 ? "" : "s"} selected`;
   $("#confirm-rebuild-subtitles").textContent = mode === "full"
     ? "Delete and rebuild everything"
@@ -1259,9 +1248,12 @@ async function rebuildSubtitles() {
     renderRebuildWindows(result.parts || []);
     const selectedRadio = document.querySelector('input[name="rebuild-mode"][value="selected"]');
     const fullRadio = document.querySelector('input[name="rebuild-mode"][value="full"]');
+    const skipPass0 = $("#rebuild-skip-pass0");
     selectedRadio.disabled = !result.selected_rebuild_available;
     selectedRadio.checked = Boolean(result.selected_rebuild_available);
     fullRadio.checked = !result.selected_rebuild_available;
+    skipPass0.checked = false;
+    skipPass0.disabled = !result.pass0_available;
     updateRebuildDialog();
     $("#rebuild-subtitles-dialog").showModal();
   } catch (error) {
@@ -1272,6 +1264,7 @@ async function rebuildSubtitles() {
 async function submitRebuildSubtitles(event) {
   event.preventDefault();
   const mode = selectedRebuildMode();
+  const skipPass0 = mode === "full" && $("#rebuild-skip-pass0").checked;
   const selected = [...document.querySelectorAll(".rebuild-window-input:checked")].map((input) => ({
     batch_id: Number(input.dataset.batchId),
     start_token_id: Number(input.dataset.startTokenId),
@@ -1292,11 +1285,13 @@ async function submitRebuildSubtitles(event) {
   try {
     await api(`/api/projects/${state.project.id}/rebuild-subtitles`, {
       method: "POST",
-      body: JSON.stringify({ mode, windows: selected }),
+      body: JSON.stringify({ mode, windows: selected, skip_pass0: skipPass0 }),
     });
     $("#rebuild-subtitles-dialog").close();
     showToast(mode === "full"
-      ? "Old subtitle data cleared; full rebuild queued"
+      ? (skipPass0
+        ? "Full rebuild queued; existing Pass 0 will be reused"
+        : "Old subtitle data cleared; full rebuild queued")
       : "Selected Windows queued; current subtitles remain until the new result is ready");
     await refreshCurrentProject();
   } catch (error) {
@@ -1852,12 +1847,6 @@ $("#clear-rebuild-windows").addEventListener("click", () => {
   updateRebuildDialog();
 });
 $("#scroll-to-active").addEventListener("click", scrollToActiveSegment);
-$("#set-start").addEventListener("click", () => adjustSelected("start"));
-$("#set-end").addEventListener("click", () => adjustSelected("end"));
-$("#nudge-back").addEventListener("click", () => adjustSelected("nudge", -100));
-$("#nudge-forward").addEventListener("click", () => adjustSelected("nudge", 100));
-$("#split-segment").addEventListener("click", splitSelected);
-$("#merge-segment").addEventListener("click", mergeSelected);
 $("#approve-render").addEventListener("click", approveAndRender);
 $("#rebuild-subtitles").addEventListener("click", rebuildSubtitles);
 $("#review-suggestions").addEventListener("click", () => void toggleReviewMode());

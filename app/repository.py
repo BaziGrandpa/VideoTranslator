@@ -225,9 +225,9 @@ class Repository:
                 """
                 INSERT INTO segments (
                     project_id, sequence, start_ms, end_ms, source_text,
-                    translated_text, start_token_id, end_token_id, quality_flags,
-                    part_id, batch_id, status, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    translated_text, start_token_id, end_token_id, source_sentence_id,
+                    sub_id, quality_flags, part_id, batch_id, status, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -239,6 +239,8 @@ class Repository:
                         translated_text,
                         segment.get("start_token_id"),
                         segment.get("end_token_id"),
+                        segment.get("source_sentence_id"),
+                        segment.get("sub_id"),
                         json.dumps(segment.get("quality_flags", [])),
                         segment.get("part_id"),
                         segment.get("batch_id"),
@@ -318,107 +320,60 @@ class Repository:
             token["timing_inferred"] = bool(token["timing_inferred"])
         return tokens
 
-    def replace_batch_review_issues(
+    def replace_source_sentences(
         self,
         project_id: str,
         part_id: int,
-        batch_id: int,
-        issues: Iterable[dict[str, Any]],
+        sentences: Iterable[dict[str, Any]],
     ) -> None:
         timestamp = now_iso()
-        rows = list(issues)
+        rows = list(sentences)
         with transaction(self.database_path) as connection:
-            connection.execute("DELETE FROM subtitle_review_issues WHERE batch_id = ?", (batch_id,))
+            connection.execute("DELETE FROM source_sentences WHERE part_id = ?", (part_id,))
             connection.executemany(
                 """
-                INSERT INTO subtitle_review_issues (
-                    project_id, part_id, batch_id, issue_key, action, issue_types,
-                    severity, reason, start_token_id, end_token_id,
-                    replacement_cues, auto_applied, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(project_id, issue_key) DO UPDATE SET
-                    part_id = excluded.part_id,
-                    batch_id = excluded.batch_id,
-                    action = excluded.action,
-                    issue_types = excluded.issue_types,
-                    severity = excluded.severity,
-                    reason = excluded.reason,
-                    start_token_id = excluded.start_token_id,
-                    end_token_id = excluded.end_token_id,
-                    replacement_cues = excluded.replacement_cues,
-                    auto_applied = excluded.auto_applied,
-                    updated_at = excluded.updated_at
+                INSERT INTO source_sentences (
+                    project_id, part_id, source_sentence_id, start_token_id, end_token_id,
+                    start_ms, end_ms, source_sentence, chinese_sentence, hidden_token_ids,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
                         project_id,
                         part_id,
-                        batch_id,
-                        f"batch-{batch_id}:{issue['issue_id']}",
-                        str(issue["action"]),
-                        json.dumps(issue.get("issue_types", []), ensure_ascii=False),
-                        str(issue.get("severity", "medium")),
-                        str(issue["reason"]),
-                        int(issue["start_token_id"]),
-                        int(issue["end_token_id"]),
-                        json.dumps(issue.get("replacement_cues", []), ensure_ascii=False),
-                        int(bool(issue.get("auto_applied", False))),
+                        int(sentence["source_sentence_id"]),
+                        int(sentence["start_token_id"]),
+                        int(sentence["end_token_id"]),
+                        int(sentence["start_ms"]),
+                        int(sentence["end_ms"]),
+                        str(sentence["source_sentence"]),
+                        str(sentence.get("chinese_sentence", "")),
+                        json.dumps(sentence.get("hidden_token_ids", [])),
                         timestamp,
                         timestamp,
                     )
-                    for issue in rows
+                    for sentence in rows
                 ],
             )
 
-    def replace_part_review_issues(
-        self,
-        project_id: str,
-        part_id: int,
-        issues: Iterable[dict[str, Any]],
-    ) -> None:
-        timestamp = now_iso()
-        rows = list(issues)
-        with transaction(self.database_path) as connection:
-            connection.execute("DELETE FROM subtitle_review_issues WHERE part_id = ?", (part_id,))
-            connection.executemany(
-                """
-                INSERT INTO subtitle_review_issues (
-                    project_id, part_id, batch_id, issue_key, action, issue_types,
-                    severity, reason, start_token_id, end_token_id,
-                    replacement_cues, auto_applied, created_at, updated_at
-                ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(project_id, issue_key) DO UPDATE SET
-                    part_id = excluded.part_id,
-                    batch_id = NULL,
-                    action = excluded.action,
-                    issue_types = excluded.issue_types,
-                    severity = excluded.severity,
-                    reason = excluded.reason,
-                    start_token_id = excluded.start_token_id,
-                    end_token_id = excluded.end_token_id,
-                    replacement_cues = excluded.replacement_cues,
-                    auto_applied = excluded.auto_applied,
-                    updated_at = excluded.updated_at
-                """,
-                [
-                    (
-                        project_id,
-                        part_id,
-                        f"part-{part_id}:{issue['issue_id']}",
-                        str(issue["action"]),
-                        json.dumps(issue.get("issue_types", []), ensure_ascii=False),
-                        str(issue.get("severity", "medium")),
-                        str(issue["reason"]),
-                        int(issue["start_token_id"]),
-                        int(issue["end_token_id"]),
-                        json.dumps(issue.get("replacement_cues", []), ensure_ascii=False),
-                        int(bool(issue.get("auto_applied", False))),
-                        timestamp,
-                        timestamp,
-                    )
-                    for issue in rows
-                ],
-            )
+    def list_source_sentences(self, part_id: int) -> list[dict[str, Any]]:
+        with connect(self.database_path) as connection:
+            rows = connection.execute(
+                "SELECT * FROM source_sentences WHERE part_id = ? ORDER BY source_sentence_id",
+                (part_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            sentence = dict(row)
+            try:
+                sentence["hidden_token_ids"] = json.loads(
+                    sentence.get("hidden_token_ids") or "[]"
+                )
+            except json.JSONDecodeError:
+                sentence["hidden_token_ids"] = []
+            result.append(sentence)
+        return result
 
     def list_review_issues(self, project_id: str) -> list[dict[str, Any]]:
         with connect(self.database_path) as connection:
@@ -443,7 +398,9 @@ class Repository:
             result.append(issue)
         return result
 
-    def clear_subtitle_data(self, project_id: str) -> None:
+    def clear_subtitle_data(
+        self, project_id: str, *, preserve_global_context: bool = False
+    ) -> None:
         with transaction(self.database_path) as connection:
             connection.execute(
                 "DELETE FROM subtitle_review_issues WHERE project_id = ?", (project_id,)
@@ -455,14 +412,21 @@ class Repository:
                 "DELETE FROM jobs WHERE project_id = ? AND status IN ('completed', 'failed')",
                 (project_id,),
             )
-            connection.execute(
+            context_reset = (
+                ""
+                if preserve_global_context
+                else """
+                    global_translation_context = NULL, global_context_provider = NULL,
+                    global_context_approved = 0,
                 """
+            )
+            connection.execute(
+                f"""
                 UPDATE projects
                 SET status = 'queued', stage = 'queued', progress = 0, error = NULL,
                     pipeline_detail = NULL,
                     subtitle_revision = 0, rendered_revision = NULL, output_path = NULL,
-                    global_translation_context = NULL, global_context_provider = NULL,
-                    global_context_approved = 0,
+                    {context_reset}
                     pending_rebuild_scope = NULL,
                     updated_at = ?
                 WHERE id = ?
@@ -544,6 +508,38 @@ class Repository:
                         )
                     rows.append((segment, source_text, translated_text, int(batch["id"])))
 
+                source_sentences = list(result.get("source_sentences", []))
+                if source_sentences:
+                    connection.execute(
+                        "DELETE FROM source_sentences WHERE part_id = ?", (part_id,)
+                    )
+                    connection.executemany(
+                        """
+                        INSERT INTO source_sentences (
+                            project_id, part_id, source_sentence_id, start_token_id,
+                            end_token_id, start_ms, end_ms, source_sentence,
+                            chinese_sentence, hidden_token_ids, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            (
+                                project_id,
+                                part_id,
+                                int(sentence["source_sentence_id"]),
+                                int(sentence["start_token_id"]),
+                                int(sentence["end_token_id"]),
+                                int(sentence["start_ms"]),
+                                int(sentence["end_ms"]),
+                                str(sentence["source_sentence"]),
+                                str(sentence.get("chinese_sentence", "")),
+                                json.dumps(sentence.get("hidden_token_ids", [])),
+                                timestamp,
+                                timestamp,
+                            )
+                            for sentence in source_sentences
+                        ],
+                    )
+
                 connection.execute("DELETE FROM segments WHERE part_id = ?", (part_id,))
                 next_sequence = int(
                     connection.execute(
@@ -555,9 +551,9 @@ class Repository:
                     """
                     INSERT INTO segments (
                         project_id, sequence, start_ms, end_ms, source_text,
-                        translated_text, start_token_id, end_token_id, quality_flags,
-                        part_id, batch_id, status, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        translated_text, start_token_id, end_token_id, source_sentence_id,
+                        sub_id, quality_flags, part_id, batch_id, status, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -569,6 +565,8 @@ class Repository:
                             translated_text,
                             int(segment["start_token_id"]),
                             int(segment["end_token_id"]),
+                            segment.get("source_sentence_id"),
+                            segment.get("sub_id"),
                             json.dumps(segment.get("quality_flags", [])),
                             part_id,
                             batch_id,
@@ -593,33 +591,6 @@ class Repository:
                         """,
                         (part_id, start, end),
                     )
-                connection.executemany(
-                    """
-                    INSERT INTO subtitle_review_issues (
-                        project_id, part_id, batch_id, issue_key, action, issue_types,
-                        severity, reason, start_token_id, end_token_id,
-                        replacement_cues, auto_applied, created_at, updated_at
-                    ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (
-                            project_id,
-                            part_id,
-                            f"partial-{part_id}-{issue['start_token_id']}-{issue['end_token_id']}:{issue['issue_id']}",
-                            str(issue["action"]),
-                            json.dumps(issue.get("issue_types", []), ensure_ascii=False),
-                            str(issue.get("severity", "medium")),
-                            str(issue["reason"]),
-                            int(issue["start_token_id"]),
-                            int(issue["end_token_id"]),
-                            json.dumps(issue.get("replacement_cues", []), ensure_ascii=False),
-                            int(bool(issue.get("auto_applied", False))),
-                            timestamp,
-                            timestamp,
-                        )
-                        for issue in result["issues"]
-                    ],
-                )
 
                 connection.execute(
                     """
@@ -701,6 +672,89 @@ class Repository:
         if segment is None:
             raise KeyError(segment_id)
         return segment
+
+    def update_segment_boundary(
+        self,
+        project_id: str,
+        segment_id: int,
+        boundary: str,
+        *,
+        value_ms: int | None = None,
+        delta_ms: int | None = None,
+    ) -> list[dict[str, Any]]:
+        if boundary not in {"start", "end"}:
+            raise ValueError("Boundary must be start or end")
+        if (value_ms is None) == (delta_ms is None):
+            raise ValueError("Provide exactly one timing value or delta")
+        timestamp = now_iso()
+        affected_ids: list[int] = []
+        with transaction(self.database_path) as connection:
+            current = connection.execute(
+                "SELECT * FROM segments WHERE project_id = ? AND id = ?",
+                (project_id, segment_id),
+            ).fetchone()
+            if current is None:
+                raise KeyError(segment_id)
+            previous = connection.execute(
+                "SELECT * FROM segments WHERE project_id = ? AND sequence = ?",
+                (project_id, int(current["sequence"]) - 1),
+            ).fetchone()
+            following = connection.execute(
+                "SELECT * FROM segments WHERE project_id = ? AND sequence = ?",
+                (project_id, int(current["sequence"]) + 1),
+            ).fetchone()
+            original = int(current["start_ms"] if boundary == "start" else current["end_ms"])
+            updated = int(value_ms if value_ms is not None else original + int(delta_ms or 0))
+
+            if boundary == "start":
+                if updated < 0:
+                    raise ValueError("Start time cannot be negative")
+                if updated >= int(current["end_ms"]):
+                    raise ValueError("Start time must be earlier than this subtitle's end time")
+                if previous is not None and updated <= int(previous["start_ms"]):
+                    raise ValueError("Start time must be later than the previous subtitle's start time")
+                connection.execute(
+                    "UPDATE segments SET start_ms = ?, status = 'edited', updated_at = ? WHERE id = ?",
+                    (updated, timestamp, current["id"]),
+                )
+                affected_ids.append(int(current["id"]))
+                if previous is not None:
+                    connection.execute(
+                        "UPDATE segments SET end_ms = ?, status = 'edited', updated_at = ? WHERE id = ?",
+                        (updated, timestamp, previous["id"]),
+                    )
+                    affected_ids.append(int(previous["id"]))
+            else:
+                if updated <= int(current["start_ms"]):
+                    raise ValueError("End time must be later than this subtitle's start time")
+                if following is not None and updated >= int(following["end_ms"]):
+                    raise ValueError("End time must be earlier than the next subtitle's end time")
+                connection.execute(
+                    "UPDATE segments SET end_ms = ?, status = 'edited', updated_at = ? WHERE id = ?",
+                    (updated, timestamp, current["id"]),
+                )
+                affected_ids.append(int(current["id"]))
+                if following is not None:
+                    connection.execute(
+                        "UPDATE segments SET start_ms = ?, status = 'edited', updated_at = ? WHERE id = ?",
+                        (updated, timestamp, following["id"]),
+                    )
+                    affected_ids.append(int(following["id"]))
+
+            connection.execute(
+                """
+                UPDATE projects
+                SET subtitle_revision = subtitle_revision + 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, project_id),
+            )
+            rows = connection.execute(
+                f"SELECT * FROM segments WHERE id IN ({','.join('?' for _ in affected_ids)}) "
+                "ORDER BY sequence",
+                affected_ids,
+            ).fetchall()
+        return [self._decode_segment(row) for row in rows]
 
     def split_segment(self, project_id: str, segment_id: int, at_ms: int) -> None:
         with transaction(self.database_path) as connection:
@@ -962,9 +1016,9 @@ class Repository:
                 """
                 INSERT INTO segments (
                     project_id, sequence, start_ms, end_ms, source_text,
-                    translated_text, start_token_id, end_token_id, quality_flags,
-                    part_id, batch_id, status, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    translated_text, start_token_id, end_token_id, source_sentence_id,
+                    sub_id, quality_flags, part_id, batch_id, status, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -976,6 +1030,8 @@ class Repository:
                         translated_text,
                         segment.get("start_token_id"),
                         segment.get("end_token_id"),
+                        segment.get("source_sentence_id"),
+                        segment.get("sub_id"),
                         json.dumps(segment.get("quality_flags", [])),
                         part_id,
                         batch_id,
@@ -1059,9 +1115,9 @@ class Repository:
                 """
                 INSERT INTO segments (
                     project_id, sequence, start_ms, end_ms, source_text,
-                    translated_text, start_token_id, end_token_id, quality_flags,
-                    part_id, batch_id, status, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    translated_text, start_token_id, end_token_id, source_sentence_id,
+                    sub_id, quality_flags, part_id, batch_id, status, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -1073,6 +1129,8 @@ class Repository:
                         translated_text,
                         int(segment["start_token_id"]),
                         int(segment["end_token_id"]),
+                        segment.get("source_sentence_id"),
+                        segment.get("sub_id"),
                         json.dumps(segment.get("quality_flags", [])),
                         part_id,
                         batch_id,

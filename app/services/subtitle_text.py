@@ -2,23 +2,29 @@ from __future__ import annotations
 
 import re
 
-SQUARE_ANNOTATION_RE = re.compile(r"\s*[\[［【][^\]］】]{1,80}[\]］】]\s*")
+KNOWN_SQUARE_ANNOTATION_RE = re.compile(
+    r"\s*[\[［【]\s*(?:clears?\s+throat|throat\s+clearing|laughs?|laughing|chuckles?|snorts?|sighs?|gasps?|music|"
+    r"applause|cheering|inaudible|crosstalk|laughter|笑|笑声|轻笑|哼笑|音乐|"
+    r"掌声|欢呼|叹气|吸气|听不清|杂音)\s*[\]］】]\s*",
+    re.IGNORECASE,
+)
 KNOWN_PARENTHETICAL_RE = re.compile(
-    r"\s*[（(]\s*(?:laughs?|laughing|chuckles?|snorts?|sighs?|gasps?|music|"
+    r"\s*[（(]\s*(?:clears?\s+throat|throat\s+clearing|laughs?|laughing|chuckles?|snorts?|sighs?|gasps?|music|"
     r"applause|cheering|inaudible|crosstalk|laughter|笑|笑声|轻笑|哼笑|音乐|"
     r"掌声|欢呼|叹气|吸气|听不清|杂音)\s*[）)]\s*",
     re.IGNORECASE,
 )
 SPEAKER_MARK_RE = re.compile(r"(?:^|\s)>>\s*")
 WHITESPACE_RE = re.compile(r"\s+")
-TRAILING_PERIOD_RE = re.compile(r"[，。,.]+(?=\s*[\"'”’》」』】）)]*\s*$)")
+LEADING_DASH_RE = re.compile(r"^[—–―⸺⸻]+")
+TRAILING_PERIOD_RE = re.compile(r"[，。,.—–―⸺⸻]+(?=\s*[\"'”’》」』】）)]*\s*$)")
 LATIN_WORD_SPACE_RE = re.compile(r"(?<=[A-Za-z0-9])\s+(?=[A-Za-z0-9])")
 LATIN_SPACE_SENTINEL = "\ue000"
 
 
 def remove_stage_directions(value: str) -> str:
     value = SPEAKER_MARK_RE.sub(" ", value)
-    value = SQUARE_ANNOTATION_RE.sub(" ", value)
+    value = KNOWN_SQUARE_ANNOTATION_RE.sub(" ", value)
     return KNOWN_PARENTHETICAL_RE.sub(" ", value)
 
 
@@ -36,6 +42,7 @@ def normalize_translated_text(value: str) -> str:
         value = LATIN_WORD_SPACE_RE.sub(LATIN_SPACE_SENTINEL, value)
         value = WHITESPACE_RE.sub("", value)
         value = value.replace(LATIN_SPACE_SENTINEL, " ")
+        value = LEADING_DASH_RE.sub("", value)
         value = TRAILING_PERIOD_RE.sub("", value)
         return value.strip()
     return WHITESPACE_RE.sub(" ", value).strip()

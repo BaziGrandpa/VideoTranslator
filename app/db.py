@@ -80,6 +80,23 @@ CREATE TABLE IF NOT EXISTS subtitle_batches (
     UNIQUE(project_id, sequence)
 );
 
+CREATE TABLE IF NOT EXISTS source_sentences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    part_id INTEGER NOT NULL REFERENCES subtitle_parts(id) ON DELETE CASCADE,
+    source_sentence_id INTEGER NOT NULL,
+    start_token_id INTEGER NOT NULL,
+    end_token_id INTEGER NOT NULL,
+    start_ms INTEGER NOT NULL,
+    end_ms INTEGER NOT NULL,
+    source_sentence TEXT NOT NULL,
+    chinese_sentence TEXT NOT NULL DEFAULT '',
+    hidden_token_ids TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(part_id, source_sentence_id)
+);
+
 CREATE TABLE IF NOT EXISTS segments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -90,6 +107,8 @@ CREATE TABLE IF NOT EXISTS segments (
     translated_text TEXT NOT NULL DEFAULT '',
     start_token_id INTEGER,
     end_token_id INTEGER,
+    source_sentence_id INTEGER,
+    sub_id INTEGER,
     quality_flags TEXT NOT NULL DEFAULT '[]',
     part_id INTEGER REFERENCES subtitle_parts(id) ON DELETE SET NULL,
     batch_id INTEGER REFERENCES subtitle_batches(id) ON DELETE SET NULL,
@@ -152,6 +171,9 @@ ON subtitle_parts(project_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_subtitle_batches_project_sequence
 ON subtitle_batches(project_id, sequence);
 
+CREATE INDEX IF NOT EXISTS idx_source_sentences_part_sequence
+ON source_sentences(part_id, source_sentence_id);
+
 CREATE INDEX IF NOT EXISTS idx_timed_tokens_project_sequence
 ON timed_tokens(project_id, sequence);
 
@@ -182,6 +204,8 @@ def init_db(database_path: Path | None = None) -> None:
         _ensure_column(connection, "segments", "quality_flags", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(connection, "segments", "part_id", "INTEGER")
         _ensure_column(connection, "segments", "batch_id", "INTEGER")
+        _ensure_column(connection, "segments", "source_sentence_id", "INTEGER")
+        _ensure_column(connection, "segments", "sub_id", "INTEGER")
         _ensure_column(connection, "projects", "subtitle_style", "TEXT")
         _ensure_column(connection, "projects", "display_name", "TEXT")
         _ensure_column(connection, "projects", "pipeline_detail", "TEXT")
