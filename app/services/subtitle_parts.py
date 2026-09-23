@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.services.subtitle_planner import _planning_ranges
-
 MIN_PART_MS = 20 * 60 * 1000
 TARGET_PART_MS = 30 * 60 * 1000
 MAX_PART_MS = 40 * 60 * 1000
@@ -11,7 +9,6 @@ MAX_PART_MS = 40 * 60 * 1000
 
 def build_subtitle_parts(
     tokens: list[dict[str, Any]],
-    window_size: int,
     chapter_starts_ms: list[int] | None = None,
 ) -> list[dict[str, Any]]:
     if not tokens:
@@ -36,7 +33,6 @@ def build_subtitle_parts(
                 "end_token_id": end,
                 "start_ms": int(tokens[start]["start_ms"]),
                 "end_ms": int(tokens[end]["end_ms"]),
-                "windows": _planning_ranges(tokens, window_size, start, end),
             }
         )
         start = end + 1

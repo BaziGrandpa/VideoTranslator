@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.config import settings
@@ -63,23 +64,6 @@ CREATE TABLE IF NOT EXISTS subtitle_parts (
     UNIQUE(project_id, sequence)
 );
 
-CREATE TABLE IF NOT EXISTS subtitle_batches (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    part_id INTEGER NOT NULL REFERENCES subtitle_parts(id) ON DELETE CASCADE,
-    sequence INTEGER NOT NULL,
-    start_token_id INTEGER NOT NULL,
-    end_token_id INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    attempts INTEGER NOT NULL DEFAULT 0,
-    provider TEXT,
-    parent_batch_id INTEGER REFERENCES subtitle_batches(id) ON DELETE SET NULL,
-    error TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(project_id, sequence)
-);
-
 CREATE TABLE IF NOT EXISTS source_sentences (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -111,7 +95,6 @@ CREATE TABLE IF NOT EXISTS segments (
     sub_id INTEGER,
     quality_flags TEXT NOT NULL DEFAULT '[]',
     part_id INTEGER REFERENCES subtitle_parts(id) ON DELETE SET NULL,
-    batch_id INTEGER REFERENCES subtitle_batches(id) ON DELETE SET NULL,
     status TEXT NOT NULL DEFAULT 'machine_translated',
     updated_at TEXT NOT NULL,
     UNIQUE(project_id, sequence)
@@ -129,25 +112,6 @@ CREATE TABLE IF NOT EXISTS timed_tokens (
     confidence REAL,
     timing_inferred INTEGER NOT NULL DEFAULT 0,
     UNIQUE(project_id, sequence)
-);
-
-CREATE TABLE IF NOT EXISTS subtitle_review_issues (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    part_id INTEGER REFERENCES subtitle_parts(id) ON DELETE CASCADE,
-    batch_id INTEGER REFERENCES subtitle_batches(id) ON DELETE CASCADE,
-    issue_key TEXT NOT NULL,
-    action TEXT NOT NULL,
-    issue_types TEXT NOT NULL DEFAULT '[]',
-    severity TEXT NOT NULL DEFAULT 'medium',
-    reason TEXT NOT NULL,
-    start_token_id INTEGER NOT NULL,
-    end_token_id INTEGER NOT NULL,
-    replacement_cues TEXT NOT NULL DEFAULT '[]',
-    auto_applied INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(project_id, issue_key)
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -168,20 +132,20 @@ ON segments(project_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_subtitle_parts_project_sequence
 ON subtitle_parts(project_id, sequence);
 
-CREATE INDEX IF NOT EXISTS idx_subtitle_batches_project_sequence
-ON subtitle_batches(project_id, sequence);
-
 CREATE INDEX IF NOT EXISTS idx_source_sentences_part_sequence
 ON source_sentences(part_id, source_sentence_id);
 
 CREATE INDEX IF NOT EXISTS idx_timed_tokens_project_sequence
 ON timed_tokens(project_id, sequence);
 
-CREATE INDEX IF NOT EXISTS idx_review_issues_project_range
-ON subtitle_review_issues(project_id, start_token_id, end_token_id);
-
 CREATE INDEX IF NOT EXISTS idx_jobs_status_created
 ON jobs(status, created_at);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -203,7 +167,6 @@ def init_db(database_path: Path | None = None) -> None:
         _ensure_column(connection, "segments", "end_token_id", "INTEGER")
         _ensure_column(connection, "segments", "quality_flags", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(connection, "segments", "part_id", "INTEGER")
-        _ensure_column(connection, "segments", "batch_id", "INTEGER")
         _ensure_column(connection, "segments", "source_sentence_id", "INTEGER")
         _ensure_column(connection, "segments", "sub_id", "INTEGER")
         _ensure_column(connection, "projects", "subtitle_style", "TEXT")
@@ -230,6 +193,106 @@ def init_db(database_path: Path | None = None) -> None:
             "TEXT NOT NULL DEFAULT ''",
         )
         _ensure_column(connection, "subtitle_parts", "translation_provider", "TEXT")
+        _retire_window_storage(connection)
+        _seed_saved_subtitle_style(connection)
+
+
+def _table_names(connection: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+
+
+def _retire_window_storage(connection: sqlite3.Connection) -> None:
+    """Drop the retired Window/Batch tables and the segment column that pointed at them."""
+    connection.execute("PRAGMA foreign_keys = OFF")
+    if "subtitle_review_issues" in _table_names(connection):
+        connection.execute("DROP TABLE subtitle_review_issues")
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(segments)")}
+    if "batch_id" in columns:
+        connection.execute("DROP TABLE IF EXISTS segments_new")
+        connection.execute(
+            """
+            CREATE TABLE segments_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL,
+                start_ms INTEGER NOT NULL,
+                end_ms INTEGER NOT NULL,
+                source_text TEXT NOT NULL,
+                translated_text TEXT NOT NULL DEFAULT '',
+                start_token_id INTEGER,
+                end_token_id INTEGER,
+                source_sentence_id INTEGER,
+                sub_id INTEGER,
+                quality_flags TEXT NOT NULL DEFAULT '[]',
+                part_id INTEGER REFERENCES subtitle_parts(id) ON DELETE SET NULL,
+                status TEXT NOT NULL DEFAULT 'machine_translated',
+                updated_at TEXT NOT NULL,
+                UNIQUE(project_id, sequence)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO segments_new (
+                id, project_id, sequence, start_ms, end_ms, source_text, translated_text,
+                start_token_id, end_token_id, source_sentence_id, sub_id, quality_flags,
+                part_id, status, updated_at
+            )
+            SELECT id, project_id, sequence, start_ms, end_ms, source_text, translated_text,
+                start_token_id, end_token_id, source_sentence_id, sub_id,
+                COALESCE(quality_flags, '[]'), part_id,
+                COALESCE(status, 'machine_translated'), updated_at
+            FROM segments
+            """
+        )
+        connection.execute("DROP TABLE segments")
+        connection.execute("ALTER TABLE segments_new RENAME TO segments")
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_segments_project_sequence
+            ON segments(project_id, sequence)
+            """
+        )
+    if "subtitle_batches" in _table_names(connection):
+        connection.execute("DROP TABLE subtitle_batches")
+    connection.execute("PRAGMA foreign_keys = ON")
+
+
+def _seed_saved_subtitle_style(connection: sqlite3.Connection) -> None:
+    """Use the saved Ancient Humans style until the user saves another style."""
+    existing = connection.execute(
+        "SELECT 1 FROM app_settings WHERE key = 'default_subtitle_style'"
+    ).fetchone()
+    if existing is not None:
+        return
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(projects)")}
+    if not {"title", "subtitle_style", "bilingual", "updated_at"} <= columns:
+        return
+    row = connection.execute(
+        """
+        SELECT subtitle_style, bilingual
+        FROM projects
+        WHERE title = 'What Did Ancient Humans Actually Do All Day?'
+          AND subtitle_style IS NOT NULL
+          AND subtitle_style != ''
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        return
+    timestamp = datetime.now(UTC).isoformat()
+    connection.execute(
+        "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ("default_subtitle_style", row["subtitle_style"], timestamp),
+    )
+    connection.execute(
+        "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ("default_bilingual", "1" if row["bilingual"] else "0", timestamp),
+    )
 
 
 def _ensure_column(

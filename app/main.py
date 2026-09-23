@@ -27,7 +27,7 @@ from app.services.exact_preview import (
     render_exact_preview,
 )
 from app.services.subtitle_quality import cue_review_problems, describe_review_problems
-from app.services.subtitle_style import default_subtitle_style, merge_subtitle_style
+from app.services.subtitle_style import merge_subtitle_style
 from app.services.subtitles import validate_segments
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -62,7 +62,7 @@ class ProjectCreate(BaseModel):
     source_url: str
     target_language: str = "zh-CN"
     max_height: int = Field(default=1080, ge=360, le=2160)
-    bilingual: bool = True
+    bilingual: bool | None = None
     translation_provider: Literal["auto", "codex", "grok"] = "auto"
     codex_model: str = Field(default="", max_length=100, pattern=r"^[A-Za-z0-9._-]*$")
 
@@ -83,6 +83,7 @@ class SegmentTimingUpdate(BaseModel):
     boundary: Literal["start", "end"]
     value_ms: int | None = Field(default=None, ge=0)
     delta_ms: Literal[-100, 100] | None = None
+    sync_neighbor: bool = True
 
 
 class SplitRequest(BaseModel):
@@ -140,15 +141,9 @@ class ExactPreviewRequest(BaseModel):
     timestamp_ms: int = Field(ge=0)
 
 
-class RebuildWindowSelection(BaseModel):
-    batch_id: int = Field(ge=1)
-    start_token_id: int = Field(ge=0)
-    end_token_id: int = Field(ge=0)
-
-
 class SubtitleRebuildRequest(BaseModel):
     mode: Literal["full", "selected"] = "full"
-    windows: list[RebuildWindowSelection] = Field(default_factory=list)
+    part_ids: list[int] = Field(default_factory=list)
     skip_pass0: bool = False
 
 
@@ -224,132 +219,80 @@ def require_global_context_review(project_id: str) -> dict:
     return project
 
 
-def _active_batches(repository_part: dict) -> list[dict]:
-    return [
-        batch
-        for batch in repository.list_subtitle_batches(int(repository_part["id"]))
-        if batch.get("error") != "Superseded by smaller retry batches"
+def _part_has_exact_token_coverage(part: dict, segments: list[dict]) -> bool:
+    part_segments = [
+        segment for segment in segments if int(segment.get("part_id") or -1) == int(part["id"])
     ]
+    expected = int(part["start_token_id"])
+    for segment in part_segments:
+        start = segment.get("start_token_id")
+        end = segment.get("end_token_id")
+        if not isinstance(start, int) or not isinstance(end, int) or start != expected or end < start:
+            return False
+        expected = end + 1
+    return bool(part_segments) and expected == int(part["end_token_id"]) + 1
 
 
-def _merged_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    merged: list[tuple[int, int]] = []
-    for start, end in sorted(ranges):
-        if merged and start <= merged[-1][1] + 1:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-        else:
-            merged.append((start, end))
-    return merged
-
-
-def build_partial_rebuild_scope(
-    project: dict, requested: list[RebuildWindowSelection]
-) -> dict:
-    if not requested:
-        raise HTTPException(status_code=422, detail="Select at least one subtitle Window")
+def build_part_rebuild_scope(project: dict, requested_part_ids: list[int]) -> dict:
+    if not requested_part_ids:
+        raise HTTPException(status_code=422, detail="Select at least one Part")
+    if not isinstance(project.get("global_translation_context"), dict) or not project.get(
+        "global_context_approved"
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Selected Part rebuild requires approved translation guidance",
+        )
     tokens = repository.list_timed_tokens(str(project["id"]))
     parts = repository.list_subtitle_parts(str(project["id"]))
     segments = repository.list_segments(str(project["id"]))
     if not tokens or not parts or not segments:
         raise HTTPException(
             status_code=409,
-            detail="Selected-Window rebuild requires existing Tokens, Parts, Windows, and Cues",
+            detail="Selected Part rebuild requires existing Tokens, Parts, and Cues",
         )
     if any(not repository.list_source_sentences(int(part["id"])) for part in parts):
         raise HTTPException(
             status_code=409,
-            detail="Run one full rebuild to create the new source-sentence map before selecting Windows",
+            detail="Run one full rebuild to create Cue IDs before selecting Parts",
         )
     if any(not isinstance(segment.get("source_sentence_id"), int) for segment in segments):
         raise HTTPException(
             status_code=409,
-            detail="Current Cues predate source-sentence tracking; run one full rebuild first",
+            detail="Current subtitles predate Cue IDs; run one full rebuild first",
         )
-    available: dict[int, tuple[dict, dict, int]] = {}
-    for part in parts:
-        for window_number, batch in enumerate(_active_batches(part), start=1):
-            available[int(batch["id"])] = (part, batch, window_number)
-
+    available = {int(part["id"]): part for part in parts}
     selected: list[dict] = []
     seen: set[int] = set()
-    for item in requested:
-        if item.batch_id in seen:
-            raise HTTPException(status_code=422, detail="A Window was selected more than once")
-        seen.add(item.batch_id)
-        resolved = available.get(item.batch_id)
-        if resolved is None:
-            raise HTTPException(status_code=409, detail=f"Window {item.batch_id} is no longer active")
-        part, batch, window_number = resolved
-        if (
-            item.start_token_id != int(batch["start_token_id"])
-            or item.end_token_id != int(batch["end_token_id"])
-        ):
+    for part_id in requested_part_ids:
+        if part_id in seen:
+            raise HTTPException(status_code=422, detail="A Part was selected more than once")
+        seen.add(part_id)
+        part = available.get(part_id)
+        if part is None:
+            raise HTTPException(status_code=409, detail=f"Part {part_id} is no longer available")
+        if not _part_has_exact_token_coverage(part, segments):
             raise HTTPException(
                 status_code=409,
-                detail=f"Window {item.batch_id} Token boundaries changed; reopen the selector",
+                detail=(
+                    f"Part {int(part['sequence']) + 1} no longer has exact Token coverage. "
+                    "Use a full rebuild."
+                ),
             )
         selected.append(
             {
-                "batch_id": int(batch["id"]),
-                "batch_sequence": int(batch["sequence"]),
                 "part_id": int(part["id"]),
                 "part_sequence": int(part["sequence"]),
-                "window_number": window_number,
-                "start_token_id": int(batch["start_token_id"]),
-                "end_token_id": int(batch["end_token_id"]),
+                "start_token_id": int(part["start_token_id"]),
+                "end_token_id": int(part["end_token_id"]),
             }
         )
-
-    for part_id in {item["part_id"] for item in selected}:
-        part = next(item for item in parts if int(item["id"]) == part_id)
-        part_segments = [
-            segment for segment in segments if int(segment.get("part_id") or -1) == part_id
-        ]
-        expected = int(part["start_token_id"])
-        for segment in part_segments:
-            start = segment.get("start_token_id")
-            end = segment.get("end_token_id")
-            if not isinstance(start, int) or not isinstance(end, int) or start != expected or end < start:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"Part {int(part['sequence']) + 1} no longer has exact Token coverage. "
-                        "Use a full rebuild before selecting individual Windows."
-                    ),
-                )
-            expected = end + 1
-        if not part_segments or expected != int(part["end_token_id"]) + 1:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Part {int(part['sequence']) + 1} has incomplete Token coverage",
-            )
-        writable = _merged_ranges(
-            [
-                (item["start_token_id"], item["end_token_id"])
-                for item in selected
-                if item["part_id"] == part_id
-            ]
-        )
-        for segment in part_segments:
-            start = int(segment["start_token_id"])
-            end = int(segment["end_token_id"])
-            overlaps = any(not (end < left or start > right) for left, right in writable)
-            contained = any(left <= start and end <= right for left, right in writable)
-            if overlaps and not contained:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"A Cue crosses the selected Window boundary at Tokens {start}-{end}. "
-                        "Select the adjacent Window too."
-                    ),
-                )
-
-    selected.sort(key=lambda item: item["batch_sequence"])
+    selected.sort(key=lambda item: item["part_sequence"])
     return {
-        "version": 1,
+        "version": 2,
         "run_id": str(uuid.uuid4()),
         "base_subtitle_revision": int(project["subtitle_revision"]),
-        "windows": selected,
+        "parts": selected,
     }
 
 
@@ -365,7 +308,8 @@ def health() -> dict:
     )
     return {
         "ok": True,
-        "subtitle_style": default_subtitle_style(),
+        "subtitle_style": repository.default_subtitle_style(),
+        "bilingual": repository.default_bilingual(),
         "dependencies": {
             "ffmpeg": command_available(settings.ffmpeg_bin),
             "ffprobe": command_available(settings.ffprobe_bin),
@@ -453,11 +397,11 @@ def approve_global_translation_context(
         global_translation_context=context,
         global_context_approved=1,
         status="queued",
-        stage="partial_rebuild_queued" if partial else "queued",
+        stage="part_rebuild_queued" if partial else "queued",
         progress=68,
         error=None,
     )
-    job = repository.enqueue_job(project_id, "partial_rebuild" if partial else "translate")
+    job = repository.enqueue_job(project_id, "part_rebuild" if partial else "translate")
     return {"context": context, "job": job}
 
 
@@ -504,11 +448,11 @@ def retry_project(project_id: str) -> dict:
             status_code=409, detail="Only failed or quota-paused projects can be retried"
         )
     if isinstance(project.get("pending_rebuild_scope"), dict):
-        kind = "partial_rebuild"
+        kind = "part_rebuild"
         repository.update_project(
             project_id,
             status="queued",
-            stage="partial_rebuild_queued",
+            stage="part_rebuild_queued",
             progress=0,
             error=None,
         )
@@ -529,55 +473,47 @@ def retry_project(project_id: str) -> dict:
     return repository.enqueue_job(project_id, kind)
 
 
-@app.get("/api/projects/{project_id}/rebuild-windows")
-def list_rebuild_windows(project_id: str) -> dict:
+@app.get("/api/projects/{project_id}/rebuild-parts")
+def list_rebuild_parts(project_id: str) -> dict:
     project = require_project(project_id)
     tokens = repository.list_timed_tokens(project_id)
     parts = repository.list_subtitle_parts(project_id)
+    pass0_available = isinstance(project.get("global_translation_context"), dict)
     if not tokens:
         return {
             "parts": [],
             "selected_rebuild_available": False,
-            "pass0_available": isinstance(project.get("global_translation_context"), dict),
+            "pass0_available": pass0_available,
         }
     result = []
     for part in parts:
-        windows = []
-        for window_number, batch in enumerate(_active_batches(part), start=1):
-            start = int(batch["start_token_id"])
-            end = int(batch["end_token_id"])
-            preview = " ".join(str(token["text"]) for token in tokens[start : min(end + 1, start + 18)])
-            windows.append(
-                {
-                    "batch_id": int(batch["id"]),
-                    "window_number": window_number,
-                    "start_token_id": start,
-                    "end_token_id": end,
-                    "start_ms": int(tokens[start]["start_ms"]) if start < len(tokens) else None,
-                    "end_ms": int(tokens[end]["end_ms"]) if end < len(tokens) else None,
-                    "preview": preview,
-                }
-            )
+        start = int(part["start_token_id"])
+        end = int(part["end_token_id"])
+        preview = " ".join(str(token["text"]) for token in tokens[start : min(end + 1, start + 18)])
         result.append(
             {
                 "part_id": int(part["id"]),
                 "part_number": int(part["sequence"]) + 1,
-                "start_token_id": int(part["start_token_id"]),
-                "end_token_id": int(part["end_token_id"]),
-                "windows": windows,
+                "start_token_id": start,
+                "end_token_id": end,
+                "start_ms": int(part["start_ms"]),
+                "end_ms": int(part["end_ms"]),
+                "cue_count": len(repository.list_source_sentences(int(part["id"]))),
+                "preview": preview,
             }
         )
-    sentence_maps_ready = bool(parts) and all(
-        repository.list_source_sentences(int(part["id"])) for part in parts
-    )
+    cue_maps_ready = bool(parts) and all(item["cue_count"] for item in result)
     tracked_segments = repository.list_segments(project_id)
     segments_ready = bool(tracked_segments) and all(
         isinstance(segment.get("source_sentence_id"), int) for segment in tracked_segments
     )
+    guidance_ready = pass0_available and bool(project.get("global_context_approved"))
     return {
         "parts": result,
-        "selected_rebuild_available": bool(tokens and parts and sentence_maps_ready and segments_ready),
-        "pass0_available": isinstance(project.get("global_translation_context"), dict),
+        "selected_rebuild_available": bool(
+            tokens and parts and cue_maps_ready and segments_ready and guidance_ready
+        ),
+        "pass0_available": pass0_available,
     }
 
 
@@ -589,9 +525,9 @@ def rebuild_subtitles(project_id: str, payload: SubtitleRebuildRequest) -> dict:
     if not project.get("video_path") or not Path(project["video_path"]).exists():
         raise HTTPException(status_code=409, detail="The project has no downloaded video")
     if payload.mode == "selected":
-        scope = build_partial_rebuild_scope(project, payload.windows)
-        repository.begin_partial_rebuild(project_id, scope)
-        return repository.enqueue_job(project_id, "partial_rebuild")
+        scope = build_part_rebuild_scope(project, payload.part_ids)
+        repository.begin_part_rebuild(project_id, scope)
+        return repository.enqueue_job(project_id, "part_rebuild")
     if payload.skip_pass0 and not isinstance(project.get("global_translation_context"), dict):
         raise HTTPException(status_code=409, detail="Pass 0 has no existing context to reuse")
     # Rebuild is destructive by design. Clear the previous subtitle pipeline state
@@ -655,16 +591,15 @@ def update_subtitle_style(project_id: str, payload: SubtitleStyleUpdate) -> dict
     style["bottom_mask"]["height"] = values["bottom_mask_height"]
     style["bottom_mask"]["opacity"] = values["bottom_mask_opacity"]
     saved_style = repository.set_subtitle_style(project_id, style)
+    bilingual = (
+        bool(project["bilingual"])
+        if values["show_english_subtitles"] is None
+        else bool(values["show_english_subtitles"])
+    )
     if values["show_english_subtitles"] is not None:
-        repository.update_project(project_id, bilingual=int(values["show_english_subtitles"]))
-    return {
-        "subtitle_style": saved_style,
-        "bilingual": bool(
-            project["bilingual"]
-            if values["show_english_subtitles"] is None
-            else values["show_english_subtitles"]
-        ),
-    }
+        repository.update_project(project_id, bilingual=int(bilingual))
+    repository.remember_subtitle_defaults(saved_style, bilingual)
+    return {"subtitle_style": saved_style, "bilingual": bilingual}
 
 
 @app.post("/api/projects/{project_id}/exact-preview")
@@ -749,6 +684,7 @@ def update_segment_timing(
             payload.boundary,
             value_ms=payload.value_ms,
             delta_ms=payload.delta_ms,
+            sync_neighbor=payload.sync_neighbor,
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="Subtitle not found") from None

@@ -60,7 +60,6 @@ TRANSLATION_PROVIDERS=codex,grok
 CODEX_MODEL=gpt-5.6-terra
 GROK_MODEL=
 CODEX_REASONING_EFFORT=low
-SUBTITLE_PLANNER_WINDOW_TOKENS=1000
 ```
 
 Use manual translation mode when only the review workbench is needed:
@@ -120,17 +119,20 @@ output/
 ```
 
 SQLite stores projects, jobs, immutable timed tokens, subtitle parts, translation contexts,
-resumable batches, editable subtitle cues, and file paths. Video files stay in their project
-directories. Videos up to 40 minutes use one part; longer videos use balanced 20–40 minute parts
-centered around 30 minutes.
+and editable subtitle cues. Video files stay in their project directories. Videos up to 40
+minutes use one Part; longer videos use balanced 20–40 minute Parts centered around 30 minutes.
+A Part is the unit for each Pass 1, Pass 2, and Pass 3 model call.
 
-`Rebuild subtitles` requires browser confirmation. After confirmation, the API synchronously
-deletes the old Pass 0 context, timed tokens, Parts, Batches, cues, and review issues before it
-queues the new Pass 0–3 run. The downloaded video, source captions, project settings, and subtitle
-style are retained.
+`Rebuild subtitles` requires browser confirmation. Full rebuild synchronously deletes the old
+Pass 0 context, timed tokens, Parts, and cues before it queues a new Pass 0–3 run. Skip Pass 0
+keeps the approved translation guidance. The downloaded video, source captions, project settings,
+and subtitle style are retained. Selected Parts keeps the approved guidance and the current
+subtitles until the chosen Parts finish Pass 1–3, then publishes them together.
 
-Subtitle rendering is independently configurable by language. These `.env` values are the
-defaults used when a project is created (and the fallback for legacy projects):
+Subtitle rendering is independently configurable by language. A new project copies the style
+from the most recent `Save style`, including whether English subtitles are shown. These `.env`
+values are used only before any style has been saved, and as the fallback for a project with
+no stored style:
 
 ```dotenv
 CHINESE_SUBTITLE_FONT=Microsoft YaHei
@@ -181,10 +183,12 @@ node --check app/static/app.js
 
 ## Current scope
 
-Python first divides each Part into fixed `source_sentence_id` ranges using English punctuation,
-speaker changes, and word-level pauses. Short comma/colon/semicolon fragments merge right; short
-complete sentences normally merge left. A 1,200 ms pause prevents merging. Known stage directions
-and speaker markers retain their Token IDs but are hidden from visible subtitles.
+Python first divides each Part into fixed Cues using English punctuation, speaker changes, and
+word-level pauses. The stored Cue ID is `source_sentence_id`, numbered from 1 inside the Part.
+Short comma/colon/semicolon fragments merge right; short complete sentences normally merge left.
+A 1,200 ms pause prevents merging. Known stage directions and speaker markers retain their Token
+IDs but are hidden from visible subtitles. A screen row is a Sub-cue: `sub_id` 0 when the Cue
+was not split, or 1, 2, 3 after Pass 3. The workbench row key remains `segments.id`.
 
 Pass 2 makes one call for the complete Part. It receives ordered IDs and clean English, the full
 Pass 1 translation, and project context, but no word-level Token IDs or timestamps. It places the
@@ -207,24 +211,12 @@ Generation, context, Part-level review requests, parsed provider responses, vali
 final results are recorded under each project's `artifacts/translation-audit/`. Records include
 the prompt version, requested model and provider (CLI-default models are not inferred).
 
-The browser Rebuild dialog supports two modes. Full rebuild preserves the existing destructive
-behavior and clears the old subtitle pipeline state immediately. Selected Windows reuses the
-existing Timed Tokens and legacy Part/Window selection envelopes. A project must complete one new
-full rebuild before Selected Windows is available. Python expands the selection to complete
-intersecting source sentences. Pass 2 reads the complete Part and existing unselected Chinese but
-returns only the selected IDs; Pass 3 splits only selected long parents. Existing subtitles stay
-visible and read-only until all affected Parts are atomically published. A revision guard prevents
-manual edits made during processing from being overwritten.
-
-To regenerate an idle project's subtitles while retaining its tokens and part contexts:
-
-```powershell
-.\.venv\Scripts\python.exe -m scripts.regenerate_subtitles PROJECT_UUID
-```
-
-This backs up the project's database records under `artifacts/backups/`, resets its active
-translation batches and queues a translation job. The worker must be running to process it.
-
+The browser Rebuild dialog supports two modes. Full rebuild clears the old subtitle pipeline
+state immediately. Selected Parts is available after one completed translation that stored Cue
+IDs. It keeps Timed Tokens, the approved Pass 0 guidance, and the current subtitles. Each
+selected Part reruns Pass 1, Pass 2, and Pass 3 for that whole Part. Unselected Parts stay as
+they are. Existing subtitles stay visible and read-only until every selected Part is published
+together. A revision guard prevents manual edits made during processing from being overwritten.
 
 - Each project handles one source video, not a playlist.
 - Only YouTube URLs are accepted.

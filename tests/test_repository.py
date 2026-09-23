@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 from app.db import init_db
@@ -120,10 +121,8 @@ def test_persists_source_sentence_map(tmp_path: Path) -> None:
                 "end_token_id": 2,
                 "start_ms": 0,
                 "end_ms": 900,
-                "windows": [(0, 2)],
             }
         ],
-        600,
     )
     part = repository.list_subtitle_parts(project["id"])[0]
     repository.replace_source_sentences(
@@ -149,7 +148,7 @@ def test_persists_source_sentence_map(tmp_path: Path) -> None:
     assert sentences[0]["hidden_token_ids"] == [0]
 
 
-def test_persists_resumable_part_and_batch_checkpoint(tmp_path: Path) -> None:
+def test_replace_part_segments_keeps_token_ranges(tmp_path: Path) -> None:
     repository = make_repository(tmp_path)
     project = repository.create_project("https://youtu.be/example")
     repository.initialize_subtitle_plan(
@@ -160,99 +159,10 @@ def test_persists_resumable_part_and_batch_checkpoint(tmp_path: Path) -> None:
                 "end_token_id": 9,
                 "start_ms": 0,
                 "end_ms": 10_000,
-                "windows": [(0, 4), (5, 9)],
             }
         ],
-        600,
     )
     part = repository.list_subtitle_parts(project["id"])[0]
-    batch = repository.list_subtitle_batches(part["id"])[0]
-    repository.save_batch_segments(
-        project["id"],
-        part["id"],
-        batch["id"],
-        [
-            {
-                "start_ms": 0,
-                "end_ms": 5000,
-                "start_token_id": 0,
-                "end_token_id": 4,
-                "source_text": "First window.",
-                "translated_text": "第一批。",
-            }
-        ],
-        "codex",
-    )
-    batches = repository.list_subtitle_batches(part["id"])
-    assert batches[0]["status"] == "completed"
-    assert batches[0]["provider"] == "codex"
-    assert batches[1]["status"] == "pending"
-    assert repository.list_segments(project["id"])[0]["translated_text"] == "第一批"
-
-
-def test_failed_large_batch_can_be_replaced_by_two_retry_batches(tmp_path: Path) -> None:
-    repository = make_repository(tmp_path)
-    project = repository.create_project("https://youtu.be/example")
-    repository.initialize_subtitle_plan(
-        project["id"],
-        [
-            {
-                "start_token_id": 0,
-                "end_token_id": 599,
-                "start_ms": 0,
-                "end_ms": 600_000,
-                "windows": [(0, 599)],
-            }
-        ],
-        600,
-    )
-    part = repository.list_subtitle_parts(project["id"])[0]
-    original = repository.list_subtitle_batches(part["id"])[0]
-    repository.split_subtitle_batch(original["id"], 299)
-    batches = repository.list_subtitle_batches(part["id"])
-    active = [batch for batch in batches if batch["status"] != "failed"]
-    assert [(batch["start_token_id"], batch["end_token_id"]) for batch in active] == [
-        (0, 299),
-        (300, 599),
-    ]
-
-
-def test_part_audit_can_resegment_across_batch_boundaries(tmp_path: Path) -> None:
-    repository = make_repository(tmp_path)
-    project = repository.create_project("https://youtu.be/example")
-    repository.initialize_subtitle_plan(
-        project["id"],
-        [
-            {
-                "start_token_id": 0,
-                "end_token_id": 9,
-                "start_ms": 0,
-                "end_ms": 10_000,
-                "windows": [(0, 4), (5, 9)],
-            }
-        ],
-        5,
-    )
-    part = repository.list_subtitle_parts(project["id"])[0]
-    batches = repository.list_subtitle_batches(part["id"])
-    for batch in batches:
-        repository.save_batch_segments(
-            project["id"],
-            part["id"],
-            batch["id"],
-            [
-                {
-                    "start_ms": batch["start_token_id"] * 1000,
-                    "end_ms": (batch["end_token_id"] + 1) * 1000,
-                    "start_token_id": batch["start_token_id"],
-                    "end_token_id": batch["end_token_id"],
-                    "source_text": f"Batch {batch['sequence']}",
-                    "translated_text": f"批次{batch['sequence']}",
-                }
-            ],
-            "codex",
-        )
-
     repository.replace_part_segments(
         project["id"],
         part["id"],
@@ -290,5 +200,62 @@ def test_part_audit_can_resegment_across_batch_boundaries(tmp_path: Path) -> Non
         (3, 6),
         (7, 9),
     ]
-    assert segments[1]["batch_id"] == batches[0]["id"]
-    assert segments[2]["batch_id"] == batches[1]["id"]
+    assert "batch_id" not in segments[0]
+    assert [segment["translated_text"] for segment in segments] == ["第一", "跨窗口", "最后"]
+
+
+def test_init_db_drops_retired_window_tables(tmp_path: Path) -> None:
+    database = tmp_path / "old.db"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE projects (id TEXT PRIMARY KEY);
+        CREATE TABLE subtitle_parts (
+            id INTEGER PRIMARY KEY,
+            project_id TEXT,
+            sequence INTEGER
+        );
+        CREATE TABLE subtitle_batches (
+            id INTEGER PRIMARY KEY,
+            project_id TEXT,
+            part_id INTEGER,
+            sequence INTEGER
+        );
+        CREATE TABLE subtitle_review_issues (id INTEGER PRIMARY KEY, project_id TEXT);
+        CREATE TABLE segments (
+            id INTEGER PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            start_ms INTEGER NOT NULL,
+            end_ms INTEGER NOT NULL,
+            source_text TEXT NOT NULL,
+            translated_text TEXT NOT NULL DEFAULT '',
+            batch_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'machine_translated',
+            updated_at TEXT NOT NULL,
+            UNIQUE(project_id, sequence)
+        );
+        INSERT INTO segments (
+            project_id, sequence, start_ms, end_ms, source_text, translated_text,
+            batch_id, status, updated_at
+        ) VALUES ('p', 0, 0, 1000, 'Hello', '你好', 1, 'machine_translated', 't');
+        """
+    )
+    connection.close()
+
+    init_db(database)
+
+    connection = sqlite3.connect(database)
+    tables = {
+        row[0]
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(segments)")}
+    row = connection.execute(
+        "SELECT source_text, translated_text FROM segments"
+    ).fetchone()
+    connection.close()
+    assert "subtitle_batches" not in tables
+    assert "subtitle_review_issues" not in tables
+    assert "batch_id" not in columns
+    assert row == ("Hello", "你好")

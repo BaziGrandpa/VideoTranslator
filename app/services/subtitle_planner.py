@@ -434,16 +434,10 @@ def align_part_sentences(
     providers: tuple[str, ...] | None = None,
     codex_model: str | None = None,
     audit_dir: Path | None = None,
-    editable_ids: set[int] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Pass 2: align one complete Part to fixed Python-owned source sentences."""
-    editable = [
-        sentence
-        for sentence in source_sentences
-        if editable_ids is None or int(sentence["source_sentence_id"]) in editable_ids
-    ]
-    if not editable:
-        raise RuntimeError("Pass 2 has no editable source sentences")
+    """Pass 2: place Pass 1 Chinese onto every Cue in one Part."""
+    if not source_sentences:
+        raise RuntimeError("Pass 2 has no cues")
     prompt = build_sentence_alignment_prompt(
         source_sentences,
         target_language,
@@ -451,7 +445,6 @@ def align_part_sentences(
         part_number,
         part_count,
         translation_context,
-        {int(item["source_sentence_id"]) for item in editable},
     )
     errors: list[str] = []
     quota_errors = 0
@@ -471,13 +464,13 @@ def align_part_sentences(
                 part=[part_number, part_count],
                 token_range=token_range,
             )
-            segments = materialize_aligned_sentences(tokens, editable, result)
+            segments = materialize_aligned_sentences(tokens, source_sentences, result)
             record_event(
                 audit_dir,
                 "part-sentence-alignment-validated",
                 part=[part_number, part_count],
                 token_range=token_range,
-                source_sentence_count=len(editable),
+                source_sentence_count=len(source_sentences),
                 segments=segments,
             )
             return segments, provider
@@ -864,38 +857,3 @@ def _assemble_sentence_split_results(
     return segments
 
 
-def _planning_ranges(
-    tokens: list[dict[str, Any]],
-    target_size: int,
-    start_token_id: int = 0,
-    end_token_id: int | None = None,
-) -> list[tuple[int, int]]:
-    ranges: list[tuple[int, int]] = []
-    start = start_token_id
-    final = len(tokens) - 1 if end_token_id is None else end_token_id
-    while start <= final:
-        target_end = min(final, start + target_size - 1)
-        if target_end < final:
-            search_start = max(start + target_size // 2, target_end - 60)
-            search_end = min(final, target_end + 60)
-            candidates = [
-                index
-                for index in range(search_start, search_end + 1)
-                if str(tokens[index]["text"]).endswith((".", "?", "!"))
-            ]
-            if candidates:
-                target_end = min(candidates, key=lambda value: abs(value - target_end))
-        ranges.append((start, target_end))
-        start = target_end + 1
-    return ranges
-
-
-def find_natural_split(tokens: list[dict[str, Any]], start: int, end: int) -> int:
-    midpoint = (start + end) // 2
-    radius = max(1, min(80, (end - start) // 3))
-    candidates = [
-        index
-        for index in range(max(start, midpoint - radius), min(end - 1, midpoint + radius) + 1)
-        if str(tokens[index]["text"]).endswith((".", "?", "!"))
-    ]
-    return min(candidates, key=lambda value: abs(value - midpoint)) if candidates else midpoint

@@ -20,7 +20,7 @@ class SubtitleQualityRules:
 
 
 RULES = SubtitleQualityRules()
-PROMPT_VERSION = "sentence-pipeline-v8.2"
+PROMPT_VERSION = "sentence-pipeline-v8.4"
 
 
 def target_units(text: str) -> float:

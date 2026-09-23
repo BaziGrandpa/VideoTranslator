@@ -97,157 +97,59 @@ class Pipeline:
         )
         self._save_tokens_and_translate(project_id, tokens)
 
-    def partial_rebuild(self, project_id: str) -> None:
-        """Rebuild complete source sentences intersecting the selected legacy Window envelopes."""
+    def part_rebuild(self, project_id: str) -> None:
+        """Rerun Pass 1–3 for each selected Part and publish those Parts together."""
         project = self.repository.get_project(project_id)
         if project is None:
             raise KeyError(project_id)
         scope = project.get("pending_rebuild_scope")
-        if not isinstance(scope, dict) or not isinstance(scope.get("windows"), list):
-            raise TypeError("The project has no pending selected-Window rebuild")
+        if isinstance(scope, dict) and "windows" in scope and "parts" not in scope:
+            raise RuntimeError(
+                "This queued rebuild still uses Window selection. Choose Parts and start it again."
+            )
+        if not isinstance(scope, dict) or not isinstance(scope.get("parts"), list):
+            raise TypeError("The project has no pending selected-Part rebuild")
         tokens = self.repository.list_timed_tokens(project_id)
         if not tokens:
-            raise RuntimeError("Selected rebuild requires the existing Timed Tokens")
+            raise RuntimeError("Selected Part rebuild requires the existing Timed Tokens")
+        global_context = project.get("global_translation_context")
+        if not isinstance(global_context, dict) or not project.get("global_context_approved"):
+            raise RuntimeError("Selected Part rebuild requires approved translation guidance")
         providers = _provider_sequence(str(project.get("translation_provider") or "auto"))
         codex_model = str(project.get("codex_model") or settings.codex_model)
         run_dir = (
             self.project_dir(project_id)
             / "artifacts"
-            / "partial-rebuilds"
+            / "part-rebuilds"
             / str(scope.get("run_id") or "unknown-run")
         )
-        global_context = project.get("global_translation_context")
-        if not isinstance(global_context, dict):
-            self.repository.update_project(
-                project_id,
-                status="running",
-                stage="building_global_context",
-                progress=66,
-                pipeline_detail={"pass": 0, "mode": "selected"},
-                error=None,
-            )
-            global_context, global_provider = generate_global_translation_context(
-                tokens,
-                str(project["target_language"]),
-                str(project.get("title") or "Untitled video"),
-                providers,
-                codex_model,
-                audit_dir=run_dir / "pass0",
-            )
-            self.repository.update_project(
-                project_id,
-                global_translation_context=global_context,
-                global_context_provider=global_provider,
-                global_context_approved=0,
-                status="waiting_context_review",
-                stage="waiting_context_review",
-                progress=68,
-                pipeline_detail={"pass": 0, "mode": "selected", "waiting_review": True},
-                error=None,
-            )
-            run_dir.mkdir(parents=True, exist_ok=True)
-            (run_dir / "global-translation-context.json").write_text(
-                json.dumps(global_context, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            return
-        if not project.get("global_context_approved"):
-            self.repository.update_project(
-                project_id,
-                status="waiting_context_review",
-                stage="waiting_context_review",
-                progress=68,
-                pipeline_detail={"pass": 0, "mode": "selected", "waiting_review": True},
-                error=None,
-            )
-            return
-
         expected_revision = int(scope.get("base_subtitle_revision", -1))
         if int(project["subtitle_revision"]) != expected_revision:
             raise RuntimeError(
-                "Subtitles changed after the selected Windows were queued; start the selection again"
+                "Subtitles changed after the selected Parts were queued; start the selection again"
             )
         parts = self.repository.list_subtitle_parts(project_id)
         parts_by_id = {int(part["id"]): part for part in parts}
-        existing_segments = self.repository.list_segments(project_id)
-        selected_windows = [dict(item) for item in scope["windows"]]
-        affected_part_ids = sorted(
-            {int(item["part_id"]) for item in selected_windows},
-            key=lambda part_id: int(parts_by_id[part_id]["sequence"]),
+        selected_parts = sorted(
+            (dict(item) for item in scope["parts"]),
+            key=lambda item: int(parts_by_id[int(item["part_id"])]["sequence"]),
         )
         results: list[dict[str, Any]] = []
-        for result_index, part_id in enumerate(affected_part_ids):
+        for result_index, selected_part in enumerate(selected_parts):
+            part_id = int(selected_part["part_id"])
             part = parts_by_id.get(part_id)
             if part is None:
                 raise RuntimeError(f"Selected Part {part_id} no longer exists")
+            if (
+                int(part["start_token_id"]) != int(selected_part["start_token_id"])
+                or int(part["end_token_id"]) != int(selected_part["end_token_id"])
+            ):
+                raise RuntimeError("A selected Part changed after it was queued")
             source_sentences = self.repository.list_source_sentences(part_id)
             if not source_sentences:
                 raise RuntimeError(
-                    "Selected rebuild requires the new source-sentence map; run one full rebuild first"
+                    f"Part {int(part['sequence']) + 1} has no cues. Run one full rebuild first."
                 )
-            windows = sorted(
-                [item for item in selected_windows if int(item["part_id"]) == part_id],
-                key=lambda item: int(item["start_token_id"]),
-            )
-            active_batches = {
-                int(batch["id"]): batch
-                for batch in self.repository.list_subtitle_batches(part_id)
-                if batch.get("error") != "Superseded by smaller retry batches"
-            }
-            for window in windows:
-                batch = active_batches.get(int(window["batch_id"]))
-                if batch is None or (
-                    int(batch["start_token_id"]) != int(window["start_token_id"])
-                    or int(batch["end_token_id"]) != int(window["end_token_id"])
-                ):
-                    raise RuntimeError("A selected Window changed after it was queued")
-            requested_ranges = [
-                (int(window["start_token_id"]), int(window["end_token_id"]))
-                for window in windows
-            ]
-            editable_sentences = [
-                sentence
-                for sentence in source_sentences
-                if any(
-                    not (
-                        int(sentence["end_token_id"]) < left
-                        or int(sentence["start_token_id"]) > right
-                    )
-                    for left, right in requested_ranges
-                )
-            ]
-            editable_ids = {
-                int(sentence["source_sentence_id"]) for sentence in editable_sentences
-            }
-            if not editable_ids:
-                raise RuntimeError("The selected Windows do not intersect a source sentence")
-            editable_ranges = [
-                (int(sentence["start_token_id"]), int(sentence["end_token_id"]))
-                for sentence in editable_sentences
-            ]
-            part_segments = [
-                dict(segment)
-                for segment in existing_segments
-                if int(segment.get("part_id") or -1) == part_id
-            ]
-            current_by_id: dict[int, list[dict[str, Any]]] = {}
-            for segment in part_segments:
-                sentence_id = segment.get("source_sentence_id")
-                if isinstance(sentence_id, int):
-                    current_by_id.setdefault(sentence_id, []).append(segment)
-            source_sentences = [
-                {
-                    **sentence,
-                    "chinese_sentence": "".join(
-                        str(item["translated_text"])
-                        for item in sorted(
-                            current_by_id.get(int(sentence["source_sentence_id"]), []),
-                            key=lambda item: int(item["start_token_id"]),
-                        )
-                    )
-                    or str(sentence.get("chinese_sentence", "")),
-                }
-                for sentence in source_sentences
-            ]
             self.repository.update_project(
                 project_id,
                 status="running",
@@ -255,7 +157,7 @@ class Pipeline:
                 progress=70,
                 pipeline_detail={
                     "pass": 1,
-                    "mode": "selected",
+                    "mode": "parts",
                     "part": int(part["sequence"]) + 1,
                     "part_count": len(parts),
                 },
@@ -276,17 +178,17 @@ class Pipeline:
             self.repository.update_project(
                 project_id,
                 stage="planning_subtitles",
-                progress=74 + round(12 * result_index / max(1, len(affected_part_ids))),
+                progress=74 + round(12 * result_index / max(1, len(selected_parts))),
                 pipeline_detail={
                     "pass": 2,
-                    "mode": "selected",
+                    "mode": "parts",
                     "part": int(part["sequence"]) + 1,
                     "part_count": len(parts),
-                    "source_sentence_count": len(editable_ids),
+                    "source_sentence_count": len(source_sentences),
                 },
                 error=None,
             )
-            selected_parents, pass2_provider = align_part_sentences(
+            selected_parents, _pass2_provider = align_part_sentences(
                 tokens,
                 source_sentences,
                 str(project["target_language"]),
@@ -297,7 +199,6 @@ class Pipeline:
                 providers=providers,
                 codex_model=codex_model,
                 audit_dir=run_dir / f"part-{int(part['sequence']) + 1:02d}" / "pass2",
-                editable_ids=editable_ids,
             )
             chinese_by_id = {
                 int(segment["source_sentence_id"]): str(segment["translated_text"])
@@ -323,10 +224,10 @@ class Pipeline:
                 self.repository.update_project(
                     project_id,
                     stage="auditing_subtitles",
-                    progress=90 + round(5 * result_index / max(1, len(affected_part_ids))),
+                    progress=90 + round(5 * result_index / max(1, len(selected_parts))),
                     pipeline_detail={
                         "pass": 3,
-                        "mode": "selected",
+                        "mode": "parts",
                         "part": int(part["sequence"]) + 1,
                         "part_count": len(parts),
                         "long_source_sentence_count": len(long_parents),
@@ -350,23 +251,12 @@ class Pipeline:
                     for item in selected_parents
                     if int(item["source_sentence_id"]) not in split_ids
                 ] + split_segments
-            retained = [
-                segment
-                for segment in part_segments
-                if not any(
-                    not (
-                        int(segment["end_token_id"]) < left
-                        or int(segment["start_token_id"]) > right
-                    )
-                    for left, right in editable_ranges
-                )
-            ]
-            hybrid = sorted(
-                [*retained, *stamp_cue_review_flags(selected_final)],
+            final_segments = sorted(
+                stamp_cue_review_flags(selected_final),
                 key=lambda item: int(item["start_token_id"]),
             )
             _validate_range_coverage(
-                hybrid, int(part["start_token_id"]), int(part["end_token_id"])
+                final_segments, int(part["start_token_id"]), int(part["end_token_id"])
             )
             results.append(
                 {
@@ -375,14 +265,7 @@ class Pipeline:
                     "reference_translation": reference["reference_translation"],
                     "reference_provider": reference_provider,
                     "source_sentences": source_sentences,
-                    "segments": hybrid,
-                    "selected_ranges": [
-                        {"start_token_id": left, "end_token_id": right}
-                        for left, right in editable_ranges
-                    ],
-                    "batch_providers": {
-                        int(window["batch_id"]): pass2_provider for window in windows
-                    },
+                    "segments": final_segments,
                 }
             )
 
@@ -390,7 +273,7 @@ class Pipeline:
             project_id,
             stage="validating_subtitles",
             progress=96,
-            pipeline_detail={"label": "Final validation", "mode": "selected"},
+            pipeline_detail={"label": "Final validation", "mode": "parts"},
             error=None,
         )
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -398,10 +281,8 @@ class Pipeline:
             json.dumps(
                 {
                     "project_id": project_id,
-                    "selected_windows": selected_windows,
-                    "affected_parts": affected_part_ids,
-                    "expanded_source_sentence_ranges": [
-                        item["selected_ranges"] for item in results
+                    "selected_parts": [
+                        int(item["part_id"]) for item in selected_parts
                     ],
                     "ready_for_atomic_commit": True,
                 },
@@ -410,7 +291,7 @@ class Pipeline:
             ),
             encoding="utf-8",
         )
-        self.repository.commit_partial_rebuild(project_id, expected_revision, results)
+        self.repository.commit_part_rebuild(project_id, expected_revision, results)
 
     def _build_timed_tokens(
         self,
@@ -511,14 +392,8 @@ class Pipeline:
 
         parts = self.repository.list_subtitle_parts(project_id)
         if not parts:
-            plan = build_subtitle_parts(
-                tokens,
-                max(40, settings.subtitle_planner_window_tokens),
-                self._chapter_starts_ms(project_id),
-            )
-            self.repository.initialize_subtitle_plan(
-                project_id, plan, settings.subtitle_planner_window_tokens
-            )
+            plan = build_subtitle_parts(tokens, self._chapter_starts_ms(project_id))
+            self.repository.initialize_subtitle_plan(project_id, plan)
             parts = self.repository.list_subtitle_parts(project_id)
         self.repository.update_project(
             project_id,
@@ -622,7 +497,7 @@ class Pipeline:
                     int(part["id"]), status="planning_subtitles", error=None
                 )
                 try:
-                    part_segments, provider = align_part_sentences(
+                    part_segments, _provider = align_part_sentences(
                         tokens,
                         source_sentences,
                         str(project["target_language"]),
@@ -670,16 +545,6 @@ class Pipeline:
                     project_id, int(part["id"]), source_sentences
                 )
                 self.repository.replace_part_segments(project_id, int(part["id"]), part_segments)
-                for batch in self.repository.list_subtitle_batches(int(part["id"])):
-                    if batch.get("error") == "Superseded by smaller retry batches":
-                        continue
-                    self.repository.update_subtitle_batch(
-                        int(batch["id"]),
-                        status="completed",
-                        attempts=int(batch["attempts"]) + 1,
-                        provider=provider,
-                        error=None,
-                    )
                 part_artifacts = self.project_dir(project_id) / "artifacts" / "parts"
                 part_artifacts.mkdir(parents=True, exist_ok=True)
                 part_name = f"part-{part_index + 1:02d}"

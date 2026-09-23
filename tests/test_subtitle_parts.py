@@ -15,11 +15,11 @@ def make_tokens(minutes: int, words_per_minute: int = 10) -> list[dict]:
 
 
 def test_short_video_is_one_part() -> None:
-    assert len(build_subtitle_parts(make_tokens(39), 600)) == 1
+    assert len(build_subtitle_parts(make_tokens(39))) == 1
 
 
 def test_two_hour_video_is_four_balanced_parts() -> None:
-    parts = build_subtitle_parts(make_tokens(120), 600)
+    parts = build_subtitle_parts(make_tokens(120))
     assert len(parts) == 4
     durations = [part["end_ms"] - part["start_ms"] for part in parts]
     assert all(25 * 60_000 <= duration <= 35 * 60_000 for duration in durations)

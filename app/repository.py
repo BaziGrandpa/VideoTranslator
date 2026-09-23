@@ -65,12 +65,15 @@ class Repository:
         source_url: str,
         target_language: str = "zh-CN",
         max_height: int = 1080,
-        bilingual: bool = True,
+        bilingual: bool | None = None,
         translation_provider: str = "auto",
         codex_model: str = "",
     ) -> dict[str, Any]:
         project_id = str(uuid.uuid4())
         timestamp = now_iso()
+        if bilingual is None:
+            bilingual = self.default_bilingual()
+        style = self.default_subtitle_style()
         with transaction(self.database_path) as connection:
             connection.execute(
                 """
@@ -88,7 +91,7 @@ class Repository:
                     int(bilingual),
                     translation_provider,
                     codex_model,
-                    json.dumps(merge_subtitle_style(None)),
+                    json.dumps(style),
                     timestamp,
                     timestamp,
                 ),
@@ -125,6 +128,46 @@ class Repository:
                 raise KeyError(project_id)
         return normalized
 
+    def default_subtitle_style(self) -> dict[str, Any]:
+        saved = self._setting("default_subtitle_style")
+        if not saved:
+            return merge_subtitle_style(None)
+        try:
+            value = json.loads(saved)
+        except json.JSONDecodeError:
+            return merge_subtitle_style(None)
+        return merge_subtitle_style(value)
+
+    def default_bilingual(self) -> bool:
+        saved = self._setting("default_bilingual")
+        if saved is None:
+            return True
+        return saved == "1"
+
+    def remember_subtitle_defaults(self, style: dict[str, Any], bilingual: bool) -> None:
+        normalized = merge_subtitle_style(style)
+        timestamp = now_iso()
+        with transaction(self.database_path) as connection:
+            for key, value in (
+                ("default_subtitle_style", json.dumps(normalized, ensure_ascii=False)),
+                ("default_bilingual", "1" if bilingual else "0"),
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO app_settings (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                    """,
+                    (key, value, timestamp),
+                )
+
+    def _setting(self, key: str) -> str | None:
+        with connect(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT value FROM app_settings WHERE key = ?", (key,)
+            ).fetchone()
+        return None if row is None else str(row["value"])
+
     def provider_usage(self, project_id: str) -> dict[str, int]:
         usage = {"codex": 0, "grok": 0}
         with connect(self.database_path) as connection:
@@ -136,17 +179,13 @@ class Repository:
                     FROM projects
                     WHERE id = ? AND global_context_provider IS NOT NULL
                     UNION ALL
-                    SELECT context_provider AS provider
+                    SELECT translation_provider AS provider
                     FROM subtitle_parts
-                    WHERE project_id = ? AND context_provider IS NOT NULL
-                    UNION ALL
-                    SELECT provider
-                    FROM subtitle_batches
-                    WHERE project_id = ? AND provider IS NOT NULL
+                    WHERE project_id = ? AND translation_provider IS NOT NULL
                 )
                 GROUP BY provider
                 """,
-                (project_id, project_id, project_id),
+                (project_id, project_id),
             ).fetchall()
         for row in rows:
             provider = "grok" if row["provider"] == "grokbuild" else row["provider"]
@@ -226,8 +265,8 @@ class Repository:
                 INSERT INTO segments (
                     project_id, sequence, start_ms, end_ms, source_text,
                     translated_text, start_token_id, end_token_id, source_sentence_id,
-                    sub_id, quality_flags, part_id, batch_id, status, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    sub_id, quality_flags, part_id, status, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -243,7 +282,6 @@ class Repository:
                         segment.get("sub_id"),
                         json.dumps(segment.get("quality_flags", [])),
                         segment.get("part_id"),
-                        segment.get("batch_id"),
                         segment.get("status", "machine_translated"),
                         timestamp,
                     )
@@ -375,36 +413,10 @@ class Repository:
             result.append(sentence)
         return result
 
-    def list_review_issues(self, project_id: str) -> list[dict[str, Any]]:
-        with connect(self.database_path) as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM subtitle_review_issues
-                WHERE project_id = ?
-                ORDER BY start_token_id, end_token_id, id
-                """,
-                (project_id,),
-            ).fetchall()
-        result = []
-        for row in rows:
-            issue = dict(row)
-            for field in ("issue_types", "replacement_cues"):
-                try:
-                    value = json.loads(issue.get(field) or "[]")
-                except json.JSONDecodeError:
-                    value = []
-                issue[field] = value if isinstance(value, list) else []
-            issue["auto_applied"] = bool(issue["auto_applied"])
-            result.append(issue)
-        return result
-
     def clear_subtitle_data(
         self, project_id: str, *, preserve_global_context: bool = False
     ) -> None:
         with transaction(self.database_path) as connection:
-            connection.execute(
-                "DELETE FROM subtitle_review_issues WHERE project_id = ?", (project_id,)
-            )
             connection.execute("DELETE FROM segments WHERE project_id = ?", (project_id,))
             connection.execute("DELETE FROM subtitle_parts WHERE project_id = ?", (project_id,))
             connection.execute("DELETE FROM timed_tokens WHERE project_id = ?", (project_id,))
@@ -434,15 +446,14 @@ class Repository:
                 (now_iso(), project_id),
             )
 
-    def begin_partial_rebuild(self, project_id: str, scope: dict[str, Any]) -> None:
-        """Queue a scoped rebuild without deleting the currently visible subtitles."""
+    def begin_part_rebuild(self, project_id: str, scope: dict[str, Any]) -> None:
+        """Queue a Part rebuild without deleting the currently visible subtitles or Pass 0."""
         with transaction(self.database_path) as connection:
             cursor = connection.execute(
                 """
                 UPDATE projects
-                SET status = 'queued', stage = 'partial_rebuild_queued', progress = 0,
-                    error = NULL, pipeline_detail = NULL, global_translation_context = NULL,
-                    global_context_provider = NULL, global_context_approved = 0,
+                SET status = 'queued', stage = 'part_rebuild_queued', progress = 0,
+                    error = NULL, pipeline_detail = NULL,
                     pending_rebuild_scope = ?, updated_at = ?
                 WHERE id = ?
                 """,
@@ -451,13 +462,13 @@ class Repository:
             if cursor.rowcount == 0:
                 raise KeyError(project_id)
 
-    def commit_partial_rebuild(
+    def commit_part_rebuild(
         self,
         project_id: str,
         expected_revision: int,
         part_results: list[dict[str, Any]],
     ) -> None:
-        """Atomically publish staged Part results after a selected-Window rebuild."""
+        """Atomically publish staged Part results after a selected-Part rebuild."""
         timestamp = now_iso()
         with transaction(self.database_path) as connection:
             project = connection.execute(
@@ -467,22 +478,12 @@ class Repository:
                 raise KeyError(project_id)
             if int(project["subtitle_revision"]) != expected_revision:
                 raise RuntimeError(
-                    "Subtitles changed while the selected-Window rebuild was running; "
+                    "Subtitles changed while the selected-Part rebuild was running; "
                     "the staged result was not published"
                 )
 
             for result in part_results:
                 part_id = int(result["part_id"])
-                batches = connection.execute(
-                    """
-                    SELECT id, start_token_id, end_token_id
-                    FROM subtitle_batches
-                    WHERE part_id = ?
-                      AND (error IS NULL OR error != 'Superseded by smaller retry batches')
-                    ORDER BY start_token_id
-                    """,
-                    (part_id,),
-                ).fetchall()
                 rows = []
                 for segment in result["segments"]:
                     source_text, translated_text = normalize_segment_texts(
@@ -491,22 +492,7 @@ class Repository:
                     )
                     if not source_text and not translated_text:
                         continue
-                    start_token_id = int(segment["start_token_id"])
-                    batch = next(
-                        (
-                            item
-                            for item in batches
-                            if int(item["start_token_id"])
-                            <= start_token_id
-                            <= int(item["end_token_id"])
-                        ),
-                        None,
-                    )
-                    if batch is None:
-                        raise RuntimeError(
-                            f"No subtitle Window contains token {start_token_id}"
-                        )
-                    rows.append((segment, source_text, translated_text, int(batch["id"])))
+                    rows.append((segment, source_text, translated_text))
 
                 source_sentences = list(result.get("source_sentences", []))
                 if source_sentences:
@@ -552,8 +538,8 @@ class Repository:
                     INSERT INTO segments (
                         project_id, sequence, start_ms, end_ms, source_text,
                         translated_text, start_token_id, end_token_id, source_sentence_id,
-                        sub_id, quality_flags, part_id, batch_id, status, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        sub_id, quality_flags, part_id, status, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -569,28 +555,12 @@ class Repository:
                             segment.get("sub_id"),
                             json.dumps(segment.get("quality_flags", [])),
                             part_id,
-                            batch_id,
                             segment.get("status", "machine_translated"),
                             timestamp,
                         )
-                        for index, (segment, source_text, translated_text, batch_id) in enumerate(
-                            rows
-                        )
+                        for index, (segment, source_text, translated_text) in enumerate(rows)
                     ],
                 )
-
-                selected_ranges = [
-                    (int(item["start_token_id"]), int(item["end_token_id"]))
-                    for item in result["selected_ranges"]
-                ]
-                for start, end in selected_ranges:
-                    connection.execute(
-                        """
-                        DELETE FROM subtitle_review_issues
-                        WHERE part_id = ? AND NOT (end_token_id < ? OR start_token_id > ?)
-                        """,
-                        (part_id, start, end),
-                    )
 
                 connection.execute(
                     """
@@ -607,16 +577,6 @@ class Repository:
                         part_id,
                     ),
                 )
-                for batch_id, provider in result["batch_providers"].items():
-                    connection.execute(
-                        """
-                        UPDATE subtitle_batches
-                        SET status = 'completed', attempts = attempts + 1, provider = ?,
-                            error = NULL, updated_at = ?
-                        WHERE id = ? AND part_id = ?
-                        """,
-                        (str(provider), timestamp, int(batch_id), part_id),
-                    )
 
             ordered = connection.execute(
                 "SELECT id FROM segments WHERE project_id = ? ORDER BY start_ms, id",
@@ -681,6 +641,7 @@ class Repository:
         *,
         value_ms: int | None = None,
         delta_ms: int | None = None,
+        sync_neighbor: bool = True,
     ) -> list[dict[str, Any]]:
         if boundary not in {"start", "end"}:
             raise ValueError("Boundary must be start or end")
@@ -718,7 +679,7 @@ class Repository:
                     (updated, timestamp, current["id"]),
                 )
                 affected_ids.append(int(current["id"]))
-                if previous is not None:
+                if previous is not None and sync_neighbor:
                     connection.execute(
                         "UPDATE segments SET end_ms = ?, status = 'edited', updated_at = ? WHERE id = ?",
                         (updated, timestamp, previous["id"]),
@@ -734,7 +695,7 @@ class Repository:
                     (updated, timestamp, current["id"]),
                 )
                 affected_ids.append(int(current["id"]))
-                if following is not None:
+                if following is not None and sync_neighbor:
                     connection.execute(
                         "UPDATE segments SET start_ms = ?, status = 'edited', updated_at = ? WHERE id = ?",
                         (updated, timestamp, following["id"]),
@@ -858,22 +819,13 @@ class Repository:
                 (now_iso(), project_id),
             )
 
-    def initialize_subtitle_plan(
-        self,
-        project_id: str,
-        parts: list[dict[str, Any]],
-        window_size: int,
-    ) -> None:
+    def initialize_subtitle_plan(self, project_id: str, parts: list[dict[str, Any]]) -> None:
         timestamp = now_iso()
         with transaction(self.database_path) as connection:
-            connection.execute(
-                "DELETE FROM subtitle_review_issues WHERE project_id = ?", (project_id,)
-            )
             connection.execute("DELETE FROM segments WHERE project_id = ?", (project_id,))
             connection.execute("DELETE FROM subtitle_parts WHERE project_id = ?", (project_id,))
-            batch_sequence = 0
             for part_sequence, part in enumerate(parts):
-                cursor = connection.execute(
+                connection.execute(
                     """
                     INSERT INTO subtitle_parts (
                         project_id, sequence, start_token_id, end_token_id,
@@ -891,70 +843,28 @@ class Repository:
                         timestamp,
                     ),
                 )
-                part_id = int(cursor.lastrowid)
-                for start_token_id, end_token_id in part["windows"]:
-                    connection.execute(
-                        """
-                        INSERT INTO subtitle_batches (
-                            project_id, part_id, sequence, start_token_id,
-                            end_token_id, status, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
-                        """,
-                        (
-                            project_id,
-                            part_id,
-                            batch_sequence,
-                            start_token_id,
-                            end_token_id,
-                            timestamp,
-                            timestamp,
-                        ),
-                    )
-                    batch_sequence += 1
 
     def list_subtitle_parts(self, project_id: str) -> list[dict[str, Any]]:
         with connect(self.database_path) as connection:
             rows = connection.execute(
                 """
-                SELECT p.*,
-                    SUM(CASE WHEN b.id IS NULL OR b.error = 'Superseded by smaller retry batches' THEN 0 ELSE 1 END) AS batch_count,
-                    SUM(CASE WHEN b.status = 'completed' THEN 1 ELSE 0 END) AS completed_batches
-                FROM subtitle_parts p
-                LEFT JOIN subtitle_batches b ON b.part_id = p.id
-                WHERE p.project_id = ?
-                GROUP BY p.id
-                ORDER BY p.sequence
+                SELECT * FROM subtitle_parts
+                WHERE project_id = ?
+                ORDER BY sequence
                 """,
                 (project_id,),
             ).fetchall()
-        result = []
-        for row in rows:
-            part = dict(row)
-            for field in ("preferred_terms", "established_terms"):
-                try:
-                    part[field] = json.loads(part.get(field) or "[]")
-                except json.JSONDecodeError:
-                    part[field] = []
-            result.append(part)
-        return result
+        return [dict(row) for row in rows]
 
     def update_subtitle_part(self, part_id: int, **fields: Any) -> None:
         allowed = {
             "status",
-            "overview",
-            "style",
-            "preferred_terms",
-            "established_terms",
-            "context_provider",
             "source_text",
             "reference_translation",
             "translation_provider",
             "error",
         }
         values = {key: value for key, value in fields.items() if key in allowed}
-        for field in ("preferred_terms", "established_terms"):
-            if field in values and not isinstance(values[field], str):
-                values[field] = json.dumps(values[field], ensure_ascii=False)
         if not values:
             return
         values["updated_at"] = now_iso()
@@ -965,34 +875,11 @@ class Repository:
                 (*values.values(), part_id),
             )
 
-    def list_subtitle_batches(self, part_id: int) -> list[dict[str, Any]]:
-        with connect(self.database_path) as connection:
-            rows = connection.execute(
-                "SELECT * FROM subtitle_batches WHERE part_id = ? ORDER BY sequence",
-                (part_id,),
-            ).fetchall()
-        return [dict(row) for row in rows]
-
-    def update_subtitle_batch(self, batch_id: int, **fields: Any) -> None:
-        allowed = {"status", "attempts", "provider", "error"}
-        values = {key: value for key, value in fields.items() if key in allowed}
-        if not values:
-            return
-        values["updated_at"] = now_iso()
-        assignments = ", ".join(f"{key} = ?" for key in values)
-        with transaction(self.database_path) as connection:
-            connection.execute(
-                f"UPDATE subtitle_batches SET {assignments} WHERE id = ?",
-                (*values.values(), batch_id),
-            )
-
-    def save_batch_segments(
+    def replace_part_segments(
         self,
         project_id: str,
         part_id: int,
-        batch_id: int,
         segments: Iterable[dict[str, Any]],
-        provider: str,
     ) -> None:
         timestamp = now_iso()
         rows = []
@@ -1004,104 +891,6 @@ class Repository:
             if not source_text and not translated_text:
                 continue
             rows.append((segment, source_text, translated_text))
-        with transaction(self.database_path) as connection:
-            connection.execute("DELETE FROM segments WHERE batch_id = ?", (batch_id,))
-            next_sequence = int(
-                connection.execute(
-                    "SELECT COALESCE(MAX(sequence), -1) + 1 FROM segments WHERE project_id = ?",
-                    (project_id,),
-                ).fetchone()[0]
-            )
-            connection.executemany(
-                """
-                INSERT INTO segments (
-                    project_id, sequence, start_ms, end_ms, source_text,
-                    translated_text, start_token_id, end_token_id, source_sentence_id,
-                    sub_id, quality_flags, part_id, batch_id, status, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        project_id,
-                        next_sequence + index,
-                        int(segment["start_ms"]),
-                        int(segment["end_ms"]),
-                        source_text,
-                        translated_text,
-                        segment.get("start_token_id"),
-                        segment.get("end_token_id"),
-                        segment.get("source_sentence_id"),
-                        segment.get("sub_id"),
-                        json.dumps(segment.get("quality_flags", [])),
-                        part_id,
-                        batch_id,
-                        segment.get("status", "machine_translated"),
-                        timestamp,
-                    )
-                    for index, (segment, source_text, translated_text) in enumerate(rows)
-                ],
-            )
-            connection.execute(
-                """
-                UPDATE subtitle_batches
-                SET status = 'completed', provider = ?, error = NULL, updated_at = ?
-                WHERE id = ?
-                """,
-                (provider, timestamp, batch_id),
-            )
-            ordered = connection.execute(
-                "SELECT id FROM segments WHERE project_id = ? ORDER BY start_ms, id",
-                (project_id,),
-            ).fetchall()
-            connection.execute(
-                "UPDATE segments SET sequence = sequence + 1000000 WHERE project_id = ?",
-                (project_id,),
-            )
-            connection.executemany(
-                "UPDATE segments SET sequence = ? WHERE id = ?",
-                [(index, row["id"]) for index, row in enumerate(ordered)],
-            )
-
-    def replace_part_segments(
-        self,
-        project_id: str,
-        part_id: int,
-        segments: Iterable[dict[str, Any]],
-    ) -> None:
-        timestamp = now_iso()
-        with connect(self.database_path) as connection:
-            batches = connection.execute(
-                """
-                SELECT id, start_token_id, end_token_id
-                FROM subtitle_batches
-                WHERE part_id = ?
-                  AND (error IS NULL OR error != 'Superseded by smaller retry batches')
-                ORDER BY start_token_id
-                """,
-                (part_id,),
-            ).fetchall()
-        rows = []
-        for segment in segments:
-            source_text, translated_text = normalize_segment_texts(
-                str(segment.get("source_text", "")),
-                str(segment.get("translated_text", "")),
-            )
-            if not source_text and not translated_text:
-                continue
-            start_token_id = int(segment["start_token_id"])
-            batch = next(
-                (
-                    item
-                    for item in batches
-                    if int(item["start_token_id"])
-                    <= start_token_id
-                    <= int(item["end_token_id"])
-                ),
-                None,
-            )
-            if batch is None:
-                raise ValueError(f"No subtitle batch contains token {start_token_id}")
-            rows.append((segment, source_text, translated_text, int(batch["id"])))
 
         with transaction(self.database_path) as connection:
             connection.execute("DELETE FROM segments WHERE part_id = ?", (part_id,))
@@ -1116,8 +905,8 @@ class Repository:
                 INSERT INTO segments (
                     project_id, sequence, start_ms, end_ms, source_text,
                     translated_text, start_token_id, end_token_id, source_sentence_id,
-                    sub_id, quality_flags, part_id, batch_id, status, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    sub_id, quality_flags, part_id, status, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -1133,11 +922,10 @@ class Repository:
                         segment.get("sub_id"),
                         json.dumps(segment.get("quality_flags", [])),
                         part_id,
-                        batch_id,
                         segment.get("status", "machine_translated"),
                         timestamp,
                     )
-                    for index, (segment, source_text, translated_text, batch_id) in enumerate(rows)
+                    for index, (segment, source_text, translated_text) in enumerate(rows)
                 ],
             )
             ordered = connection.execute(
@@ -1152,58 +940,6 @@ class Repository:
                 "UPDATE segments SET sequence = ? WHERE id = ?",
                 [(index, row["id"]) for index, row in enumerate(ordered)],
             )
-
-    def split_subtitle_batch(self, batch_id: int, split_after_token_id: int) -> None:
-        timestamp = now_iso()
-        with transaction(self.database_path) as connection:
-            batch = connection.execute(
-                "SELECT * FROM subtitle_batches WHERE id = ?", (batch_id,)
-            ).fetchone()
-            if batch is None:
-                raise KeyError(batch_id)
-            if not batch["start_token_id"] <= split_after_token_id < batch["end_token_id"]:
-                raise ValueError("The batch split point is outside the batch")
-            connection.execute(
-                "UPDATE subtitle_batches SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
-                ("Superseded by smaller retry batches", timestamp, batch_id),
-            )
-            later = connection.execute(
-                "SELECT id, sequence FROM subtitle_batches WHERE project_id = ? AND sequence > ? ORDER BY sequence DESC",
-                (batch["project_id"], batch["sequence"]),
-            ).fetchall()
-            for row in later:
-                connection.execute(
-                    "UPDATE subtitle_batches SET sequence = ? WHERE id = ?",
-                    (row["sequence"] + 1, row["id"]),
-                )
-            connection.execute(
-                "UPDATE subtitle_batches SET sequence = ? WHERE id = ?",
-                (-int(batch_id), batch_id),
-            )
-            for offset, (start_id, end_id) in enumerate(
-                (
-                    (batch["start_token_id"], split_after_token_id),
-                    (split_after_token_id + 1, batch["end_token_id"]),
-                )
-            ):
-                connection.execute(
-                    """
-                    INSERT INTO subtitle_batches (
-                        project_id, part_id, sequence, start_token_id, end_token_id,
-                        status, parent_batch_id, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
-                    """,
-                    (
-                        batch["project_id"],
-                        batch["part_id"],
-                        batch["sequence"] + offset,
-                        start_id,
-                        end_id,
-                        batch_id,
-                        timestamp,
-                        timestamp,
-                    ),
-                )
 
     def normalize_existing_segments(self, project_id: str | None = None) -> int:
         changed = 0

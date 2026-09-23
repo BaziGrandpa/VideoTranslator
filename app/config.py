@@ -101,8 +101,6 @@ class Settings:
     codex_model: str = os.getenv("CODEX_MODEL", "")
     codex_reasoning_effort: str = os.getenv("CODEX_REASONING_EFFORT", "low")
     grok_model: str = os.getenv("GROK_MODEL", "")
-    translation_batch_size: int = int(os.getenv("TRANSLATION_BATCH_SIZE", "30"))
-    subtitle_planner_window_tokens: int = int(os.getenv("SUBTITLE_PLANNER_WINDOW_TOKENS", "1000"))
     translation_timeout_seconds: int = int(os.getenv("TRANSLATION_TIMEOUT_SECONDS", "600"))
     max_video_height: int = int(os.getenv("MAX_VIDEO_HEIGHT", "1080"))
     whisper_model: str = os.getenv("WHISPER_MODEL", "small.en")

@@ -95,7 +95,7 @@ def test_translate_saves_part_level_pass2_and_pass3_results(tmp_path: Path, monk
     monkeypatch.setattr(
         pipeline_module,
         "settings",
-        replace(pipeline_module.settings, subtitle_planner_window_tokens=40, data_dir=tmp_path),
+        replace(pipeline_module.settings, data_dir=tmp_path),
     )
     pipeline = Pipeline(repository)
     pipeline.translate(project["id"])
@@ -112,7 +112,6 @@ def test_translate_saves_part_level_pass2_and_pass3_results(tmp_path: Path, monk
     parts = repository.list_subtitle_parts(project["id"])
     source_sentences = repository.list_source_sentences(parts[0]["id"])
     segments = repository.list_segments(project["id"])
-    batches = repository.list_subtitle_batches(parts[0]["id"])
     assert parts[0]["status"] == "completed"
     assert parts[0]["reference_translation"] == "完整、连贯的中文参考译文。"
     assert len(pass2_calls) == 1
@@ -121,7 +120,6 @@ def test_translate_saves_part_level_pass2_and_pass3_results(tmp_path: Path, monk
     assert len(segments) == len(source_sentences)
     assert all(sentence["chinese_sentence"] for sentence in source_sentences)
     assert all(segment["source_sentence_id"] for segment in segments)
-    assert all(batch["status"] == "completed" for batch in batches)
     assert repository.get_project(project["id"])["status"] == "waiting_review"
 
 
@@ -167,7 +165,7 @@ def test_pass3_retry_reuses_completed_part_level_pass2(tmp_path: Path, monkeypat
     monkeypatch.setattr(
         pipeline_module,
         "settings",
-        replace(pipeline_module.settings, subtitle_planner_window_tokens=40, data_dir=tmp_path),
+        replace(pipeline_module.settings, data_dir=tmp_path),
     )
     pipeline = Pipeline(repository)
     with pytest.raises(RuntimeError, match="temporary Pass 3 failure"):
@@ -179,3 +177,106 @@ def test_pass3_retry_reuses_completed_part_level_pass2(tmp_path: Path, monkeypat
     assert pass2_calls == 1
     assert pass3_calls == 2
     assert repository.get_project(project["id"])["status"] == "waiting_review"
+
+
+def test_part_rebuild_reruns_only_the_selected_part(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "pipeline.db"
+    init_db(database)
+    repository = Repository(database)
+    project = repository.create_project("https://youtu.be/example")
+    context = {"overview": "Keep", "style": "Natural", "terms": []}
+    repository.update_project(
+        project["id"],
+        title="Test video",
+        global_translation_context=context,
+        global_context_approved=1,
+    )
+    repository.replace_timed_tokens(project["id"], _tokens(20))
+    repository.initialize_subtitle_plan(
+        project["id"],
+        [
+            {"start_token_id": 0, "end_token_id": 9, "start_ms": 0, "end_ms": 5000},
+            {"start_token_id": 10, "end_token_id": 19, "start_ms": 5000, "end_ms": 10000},
+        ],
+    )
+    parts = repository.list_subtitle_parts(project["id"])
+    for part in parts:
+        repository.replace_source_sentences(
+            project["id"],
+            part["id"],
+            [
+                {
+                    "source_sentence_id": 1,
+                    "start_token_id": part["start_token_id"],
+                    "end_token_id": part["end_token_id"],
+                    "start_ms": part["start_ms"],
+                    "end_ms": part["end_ms"],
+                    "source_sentence": f"Part {part['sequence']}",
+                    "chinese_sentence": "旧译文",
+                }
+            ],
+        )
+        repository.replace_part_segments(
+            project["id"],
+            part["id"],
+            [
+                {
+                    "start_ms": part["start_ms"],
+                    "end_ms": part["end_ms"],
+                    "start_token_id": part["start_token_id"],
+                    "end_token_id": part["end_token_id"],
+                    "source_sentence_id": 1,
+                    "sub_id": 0,
+                    "source_text": f"Part {part['sequence']}",
+                    "translated_text": f"旧译文{part['sequence']}",
+                }
+            ],
+        )
+    selected = parts[1]
+    repository.begin_part_rebuild(
+        project["id"],
+        {
+            "version": 2,
+            "run_id": "test-run",
+            "base_subtitle_revision": repository.get_project(project["id"])["subtitle_revision"],
+            "parts": [
+                {
+                    "part_id": selected["id"],
+                    "part_sequence": selected["sequence"],
+                    "start_token_id": selected["start_token_id"],
+                    "end_token_id": selected["end_token_id"],
+                }
+            ],
+        },
+    )
+    pass1_calls = []
+
+    def fake_reference(*_args, **_kwargs):
+        pass1_calls.append(1)
+        return ({"source_text": "Selected part", "reference_translation": "新的整段译文"}, "codex")
+
+    def fake_align(_tokens, sentences, *_args, **_kwargs):
+        return ([_segment(item, "新译文") for item in sentences], "codex")
+
+    def fail_split(*_args, **_kwargs):
+        raise AssertionError("Pass 3 should not run for a short cue")
+
+    monkeypatch.setattr(pipeline_module, "generate_reference_translation", fake_reference)
+    monkeypatch.setattr(pipeline_module, "align_part_sentences", fake_align)
+    monkeypatch.setattr(pipeline_module, "split_long_sentences", fail_split)
+    monkeypatch.setattr(
+        pipeline_module, "settings", replace(pipeline_module.settings, data_dir=tmp_path)
+    )
+
+    Pipeline(repository).part_rebuild(project["id"])
+
+    saved = repository.get_project(project["id"])
+    segments = repository.list_segments(project["id"])
+    by_part = {int(segment["part_id"]): segment["translated_text"] for segment in segments}
+    assert pass1_calls == [1]
+    assert by_part[parts[0]["id"]] == "旧译文0"
+    assert by_part[parts[1]["id"]] == "新译文"
+    assert saved["global_translation_context"] == context
+    assert saved["global_context_approved"] is True
+    assert saved["pending_rebuild_scope"] is None
+    assert saved["status"] == "waiting_review"

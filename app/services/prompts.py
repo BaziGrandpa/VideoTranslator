@@ -134,8 +134,11 @@ def build_reference_translation_prompt(
         "audience. Do not summarize, omit, add, explain, annotate, split it into subtitle cues, or "
         "return JSON or Markdown. Return only the complete translated text with normal Chinese "
         "punctuation. Do not use em dashes, en dashes, or Chinese dash pairs such as —, –, or ——. "
-        "Use commas, semicolons, colons, or periods instead. Never begin or end the translation or "
-        "any clause with a dash.\n\n"
+        "Use commas, semicolons, colons, or periods instead. If a clause would run about "
+        f"{RULES.max_target_units} Chinese characters with no comma, period, or semicolon, break it "
+        "at a natural clause boundary with a comma. Keep names, numbers, and fixed expressions "
+        "intact. Keep each piece a real clause, not a chopped phrase. Never begin or end the "
+        "translation or any clause with a dash.\n\n"
         f"{SECURITY_BLOCK}\n\n"
         f"Video title: {title}\nPart: {part_number}/{part_count}\n"
         "GLOBAL PROJECT CONTEXT:\n"
@@ -153,26 +156,15 @@ def build_sentence_alignment_prompt(
     part_number: int,
     part_count: int,
     translation_context: dict[str, Any],
-    editable_ids: set[int],
 ) -> str:
     payload = [
         {
             "source_sentence_id": int(item["source_sentence_id"]),
             "source_sentence": str(item["source_sentence"]),
-            "editable": int(item["source_sentence_id"]) in editable_ids,
-            **(
-                {"current_chinese": str(item.get("chinese_sentence", ""))}
-                if item.get("chinese_sentence")
-                else {}
-            ),
         }
         for item in source_sentences
     ]
-    expected = [
-        int(item["source_sentence_id"])
-        for item in source_sentences
-        if int(item["source_sentence_id"]) in editable_ids
-    ]
+    expected = [int(item["source_sentence_id"]) for item in source_sentences]
     return (
         "You are Pass 2. Python has already cut this Part into fixed English cues. Pass 1 already "
         f"produced the continuous {target_language} translation. Your first job is to place that "
@@ -186,10 +178,10 @@ def build_sentence_alignment_prompt(
         "meaning, and do not paraphrase the same meaning on two neighboring rows. Light rephrasing "
         "is allowed only to sit on a cue boundary. Do not split or merge cues. Do not split for "
         "subtitle length. Follow Pass 0 terms already realized in Pass 1.\n\n"
-        "Return exactly one output row for every editable ID, in the supplied order. Return no rows "
-        "for read-only IDs. The JSON field chinese_sentence holds that cue's Chinese. Do not return "
-        "English, Token IDs, timestamps, commentary, or Markdown. Return only JSON matching the "
-        "schema.\n\n"
+        "Return exactly one output row for every Cue, in the supplied order. The JSON field "
+        "source_sentence_id is the Cue ID. The JSON field chinese_sentence holds that cue's Chinese. "
+        "Do not return English, Token IDs, timestamps, commentary, or Markdown. Return only JSON "
+        "matching the schema.\n\n"
         f"{SECURITY_BLOCK}\n\n"
         f"TITLE: {title}\nPART: {part_number}/{part_count}\n"
         f"GLOBAL PROJECT CONTEXT: {_dump(global_context_payload(translation_context))}\n\n"

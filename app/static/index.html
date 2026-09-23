@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Video Translator</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2216%22 fill=%22%2338d39f%22/><text x=%2232%22 y=%2241%22 text-anchor=%22middle%22 font-size=%2228%22 font-family=%22Arial%22 font-weight=%22700%22 fill=%22%2306251b%22>VT</text></svg>" />
-    <link rel="stylesheet" href="/static/styles.css?v=20260918-2" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260923-part-rebuild" />
   </head>
   <body>
     <div class="app-shell">
@@ -259,21 +259,21 @@
         </div>
         <label class="rebuild-mode-option">
           <input type="radio" name="rebuild-mode" value="selected" checked />
-          <span><strong>Selected Windows</strong><small>Keep current subtitles until the selected ranges pass Pass 0–3.</small></span>
+          <span><strong>Selected Parts</strong><small>Keep current subtitles until the selected Parts finish Pass 1–3. Approved translation guidance stays.</small></span>
         </label>
         <label class="rebuild-mode-option">
           <input type="radio" name="rebuild-mode" value="full" />
           <span><strong>Full rebuild</strong><small>Immediately delete all current translation data and reconstruct the complete pipeline.</small></span>
         </label>
-        <div id="rebuild-window-panel">
-          <div class="rebuild-window-toolbar">
+        <div id="rebuild-part-panel">
+          <div class="rebuild-part-toolbar">
             <span id="rebuild-selection-summary" class="muted"></span>
-            <div><button type="button" id="select-all-rebuild-windows">Select all</button><button type="button" id="clear-rebuild-windows">Clear</button></div>
+            <div><button type="button" id="select-all-rebuild-parts">Select all</button><button type="button" id="clear-rebuild-parts">Clear</button></div>
           </div>
-          <div id="rebuild-window-list" class="rebuild-window-list"></div>
+          <div id="rebuild-part-list" class="rebuild-part-list"></div>
         </div>
         <div id="rebuild-full-warning" class="rebuild-warning hidden">
-          Full rebuild clears the current Pass 0 context, Tokens, Parts, Cues, timing edits, and review issues as soon as you confirm. The downloaded video and source captions remain.
+          Full rebuild clears the current Pass 0 context, Tokens, Parts, Cues, and timing edits as soon as you confirm. The downloaded video and source captions remain.
         </div>
         <label id="rebuild-skip-pass0-option" class="rebuild-skip-option hidden">
           <input type="checkbox" id="rebuild-skip-pass0" />
@@ -282,12 +282,12 @@
         <div id="rebuild-dialog-error" class="error-box hidden"></div>
         <div class="dialog-actions">
           <button type="button" id="cancel-rebuild-dialog">Cancel</button>
-          <button type="submit" id="confirm-rebuild-subtitles" class="primary">Rebuild selected Windows</button>
+          <button type="submit" id="confirm-rebuild-subtitles" class="primary">Rebuild selected Parts</button>
         </div>
       </form>
     </dialog>
 
     <div id="toast" class="toast hidden"></div>
-    <script src="/static/app.js?v=20260918-2" defer></script>
+    <script src="/static/app.js?v=20260923-part-rebuild" defer></script>
   </body>
 </html>

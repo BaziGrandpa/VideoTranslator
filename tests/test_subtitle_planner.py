@@ -1,5 +1,3 @@
-from itertools import pairwise
-
 from app.services.prompts import (
     build_global_context_prompt,
     build_reference_translation_prompt,
@@ -12,11 +10,11 @@ from app.services.subtitle_planner import (
     GLOBAL_CONTEXT_TERM_LIMIT,
     _add_term_occurrence_counts,
     _normalize_global_context,
-    _planning_ranges,
     _select_consistency_terms,
     _split_chinese_on_punctuation,
     split_long_sentences,
 )
+from app.services.subtitle_quality import RULES
 
 
 def test_global_context_prompt_uses_plain_project_source_and_name_policy() -> None:
@@ -171,6 +169,10 @@ def test_reference_translation_prompt_has_plain_source_without_token_metadata() 
     assert "多巴胺" in prompt
     assert "Do not use em dashes" in prompt
     assert "Never begin or end the translation or any clause with a dash" in prompt
+    assert (
+        f"about {RULES.max_target_units} Chinese characters with no comma, period, or semicolon"
+        in prompt
+    )
 
 
 def test_part_pass2_prompt_places_pass1_back_with_adjacent_coherence() -> None:
@@ -194,7 +196,6 @@ def test_part_pass2_prompt_places_pass1_back_with_adjacent_coherence() -> None:
         1,
         1,
         {"reference_translation": "完整参考译文。", "terms": []},
-        {1, 2},
     )
 
     assert "place that Pass 1 text back onto the English cues" in prompt
@@ -476,18 +477,3 @@ def test_pass3_1_uses_proportional_fallback_for_non_monotonic_boundaries(
         item["end_token_id"] for item in segments
     )
     assert segments[-1]["end_token_id"] == 8
-
-
-def test_planning_ranges_cover_requested_part() -> None:
-    tokens = [
-        {
-            "text": "end." if index in {24, 49, 74} else "word",
-            "start_ms": index,
-            "end_ms": index + 1,
-        }
-        for index in range(100)
-    ]
-    ranges = _planning_ranges(tokens, 30, 10, 89)
-    assert ranges[0][0] == 10
-    assert ranges[-1][1] == 89
-    assert all(left[1] + 1 == right[0] for left, right in pairwise(ranges))

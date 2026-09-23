@@ -16,11 +16,12 @@ const state = {
   styleSavePromise: null,
   contextDirty: false,
   contextSavePromise: null,
-  rebuildWindows: [],
+  rebuildParts: [],
   localRenderLockProjectId: null,
   pendingSaves: new Set(),
   unsavedSegmentFields: new Set(),
   segmentTextSaves: new Map(),
+  independentTimingBoundaries: new Set(),
   segmentSaveFailed: false,
   exactPreview: {
     open: false,
@@ -68,16 +69,13 @@ const stageNames = {
   building_global_context: "Building global names and terminology",
   waiting_context_review: "Waiting for Pass 0 translation guidance review",
   translating: "Generating translations",
-  planning_subtitles: "Planning semantic cues and translations",
-  summarizing_part: "Building legacy translation context",
-  translating_part: "Processing legacy subtitle windows",
-  translating_reference: "Translating the complete part as coherent text",
-  planning_subtitles: "Creating timed subtitles from the part translation",
-  auditing_subtitles: "Auditing subtitle meaning and readability",
+  translating_reference: "Translating the complete Part as coherent text",
+  planning_subtitles: "Placing the Part translation onto cues",
+  auditing_subtitles: "Splitting overlong Chinese cues",
   waiting_for_quota: "Paused at a saved checkpoint; waiting for CLI quota",
   validating_subtitles: "Validating timing and readability",
   rebuild_queued: "Queued for subtitle rebuilding",
-  partial_rebuild_queued: "Queued for selected-Window rebuilding",
+  part_rebuild_queued: "Queued for selected-Part rebuilding",
   waiting_review: "Waiting for human review",
   render_queued: "Approved and queued for rendering",
   rendering: "Burning subtitles and rendering video",
@@ -92,17 +90,8 @@ function formatPipelineDetail(detail) {
   if (Number.isInteger(detail.part)) {
     items.push(`Part ${detail.part}${Number.isInteger(detail.part_count) ? `/${detail.part_count}` : ""}`);
   }
-  if (Number.isInteger(detail.window)) {
-    items.push(`Window ${detail.window}${Number.isInteger(detail.window_count) ? `/${detail.window_count}` : ""}`);
-  } else if (Array.isArray(detail.windows) && detail.windows.length) {
-    items.push(`Windows ${detail.windows.join(", ")}`);
-  }
-  if (
-    Number.isInteger(detail.selected_window)
-    && Number.isInteger(detail.selected_window_count)
-    && detail.selected_window_count > 1
-  ) {
-    items.push(`Selected ${detail.selected_window}/${detail.selected_window_count}`);
+  if (Number.isInteger(detail.source_sentence_count)) {
+    items.push(`${detail.source_sentence_count} cues`);
   }
   if (Number.isInteger(detail.start_token_id) && Number.isInteger(detail.end_token_id)) {
     items.push(`Tokens ${detail.start_token_id}–${detail.end_token_id}`);
@@ -335,6 +324,7 @@ async function openProject(projectId) {
   state.selectedId = null;
   state.unsavedSegmentFields.clear();
   state.segmentTextSaves.clear();
+  state.independentTimingBoundaries.clear();
   state.segmentSaveFailed = false;
   state.contextDirty = false;
   state.contextSavePromise = null;
@@ -382,7 +372,7 @@ function renderProject() {
   const partProgress = $("#part-progress");
   const parts = project.subtitle_parts || [];
   partProgress.innerHTML = parts.map((part) =>
-    `<span class="part-chip ${escapeHtml(part.status)}">Part ${part.sequence + 1}/${parts.length}: ${escapeHtml(part.status)} (${part.completed_batches || 0}/${part.batch_count || 0})</span>`
+    `<span class="part-chip ${escapeHtml(part.status)}">Part ${part.sequence + 1}/${parts.length}: ${escapeHtml(part.status)}</span>`
   ).join("");
   renderGlobalContextPanel(project);
 
@@ -630,19 +620,19 @@ async function performSaveGlobalContext(approve) {
       const partial = Boolean(state.project.pending_rebuild_scope);
       state.project.global_context_approved = true;
       state.project.status = "queued";
-      state.project.stage = partial ? "partial_rebuild_queued" : "queued";
+      state.project.stage = partial ? "part_rebuild_queued" : "queued";
       state.project.progress = 68;
       const listed = state.projects.find((project) => project.id === state.project.id);
       if (listed) {
         listed.status = "queued";
-        listed.stage = partial ? "partial_rebuild_queued" : "queued";
+        listed.stage = partial ? "part_rebuild_queued" : "queued";
         listed.progress = 68;
       }
       renderProject();
       renderProjectList();
       syncPolling();
       showToast(partial
-        ? "Translation guidance approved; selected-Window Pass 1 is queued"
+        ? "Translation guidance approved; selected-Part Pass 1 is queued"
         : "Translation guidance approved; Pass 1 is queued");
     } else {
       $("#context-save-state").textContent = "Draft saved";
@@ -851,23 +841,36 @@ function timeFieldsMarkup(segment, showWarning) {
   const warning = showWarning && issue
     ? `<span class="quality-warning" title="${escapeHtml((issue.issue_types || []).map((flag) => flag.replaceAll("_", " ")).join(", "))}">Check readability</span>`
     : "";
+  const independentStart = state.independentTimingBoundaries.has(`${segment.id}:start`);
+  const independentEnd = state.independentTimingBoundaries.has(`${segment.id}:end`);
   return `
     <div class="time-fields">
       <div class="time-field-row">
         <input class="start-time" aria-label="Start time" value="${formatTime(segment.start_ms)}" />
         <button class="time-adjust" type="button" data-boundary="start" data-delta="-100" aria-label="Move start 100 milliseconds earlier" title="Start −100 ms">−</button>
         <button class="time-adjust" type="button" data-boundary="start" data-delta="100" aria-label="Move start 100 milliseconds later" title="Start +100 ms">+</button>
+        <label class="independent-time-toggle" title="Adjust start without changing the previous subtitle">
+          <input type="checkbox" data-boundary="start" ${independentStart ? "checked" : ""} aria-label="Adjust start independently" />
+          <span aria-hidden="true"></span>
+        </label>
       </div>
       <div class="time-field-row">
         <input class="end-time" aria-label="End time" value="${formatTime(segment.end_ms)}" />
         <button class="time-adjust" type="button" data-boundary="end" data-delta="-100" aria-label="Move end 100 milliseconds earlier" title="End −100 ms">−</button>
         <button class="time-adjust" type="button" data-boundary="end" data-delta="100" aria-label="Move end 100 milliseconds later" title="End +100 ms">+</button>
+        <label class="independent-time-toggle" title="Adjust end without changing the next subtitle">
+          <input type="checkbox" data-boundary="end" ${independentEnd ? "checked" : ""} aria-label="Adjust end independently" />
+          <span aria-hidden="true"></span>
+        </label>
       </div>
       ${warning}
     </div>`;
 }
 
 function bindTimingControls(row, id) {
+  row.querySelectorAll(".independent-time-toggle").forEach((toggle) => {
+    toggle.addEventListener("click", (event) => event.stopPropagation());
+  });
   row.querySelector(".start-time").addEventListener("change", (event) => {
     void saveTimeInput(id, "start", event.target);
   });
@@ -880,6 +883,13 @@ function bindTimingControls(row, id) {
         boundary: button.dataset.boundary,
         delta_ms: Number(button.dataset.delta),
       });
+    });
+  });
+  row.querySelectorAll(".independent-time-toggle input").forEach((toggle) => {
+    toggle.addEventListener("change", () => {
+      const key = `${id}:${toggle.dataset.boundary}`;
+      if (toggle.checked) state.independentTimingBoundaries.add(key);
+      else state.independentTimingBoundaries.delete(key);
     });
   });
 }
@@ -968,12 +978,16 @@ function applyTimingSegments(segments) {
 
 function updateCueTiming(id, payload) {
   const projectId = state.project.id;
+  const requestPayload = {
+    ...payload,
+    sync_neighbor: !state.independentTimingBoundaries.has(`${id}:${payload.boundary}`),
+  };
   const previous = state.timingChangeQueue || Promise.resolve();
   const task = previous.catch(() => {}).then(async () => {
     try {
       const result = await api(`/api/projects/${projectId}/segments/${id}/timing`, {
         method: "PATCH",
-        body: JSON.stringify(payload),
+        body: JSON.stringify(requestPayload),
       });
       if (state.project?.id === projectId) {
         applyTimingSegments(result.segments || []);
@@ -1133,6 +1147,44 @@ function startVideoSync() {
   else requestAnimationFrame(tick);
 }
 
+function toggleVideoPlaybackFromKeyboard(event) {
+  if (event.code !== "Space" || event.repeat || event.defaultPrevented) return;
+  if (event.target.closest("input, textarea, select, button, [contenteditable='true']")) return;
+  const workspace = $("#review-workspace");
+  const video = $("#video");
+  if (
+    !state.project
+    || workspace.classList.contains("hidden")
+    || workspace.inert
+    || state.exactPreview.open
+    || !video.currentSrc
+  ) return;
+  event.preventDefault();
+  if (video.paused) void video.play();
+  else video.pause();
+}
+
+function focusFirstInvalidCueFromError(message) {
+  const video = $("#video");
+  const workspace = $("#review-workspace");
+  if (
+    !video.paused
+    || state.reviewMode
+    || workspace.classList.contains("hidden")
+    || workspace.inert
+  ) return;
+  const cueNumbers = [];
+  for (const match of String(message).matchAll(/\bSubtitles?\s+(\d+)(?:\s+and\s+(\d+))?/gi)) {
+    cueNumbers.push(Number(match[1]));
+    if (match[2]) cueNumbers.push(Number(match[2]));
+  }
+  const firstCueNumber = Math.min(...cueNumbers.filter(Number.isInteger));
+  const segment = state.segments[firstCueNumber - 1];
+  if (!segment) return;
+  selectSegment(segment.id, false);
+  scrollSegmentListToCenter(segment.id);
+}
+
 async function approveAndRender() {
   if (!state.project || projectIsRenderLocked()) return;
   const projectId = state.project.id;
@@ -1157,6 +1209,7 @@ async function approveAndRender() {
     if (state.project?.id === projectId) {
       renderProject();
       renderProviderControl();
+      focusFirstInvalidCueFromError(error.message);
     }
     showToast(error.message);
   }
@@ -1187,55 +1240,28 @@ function selectedRebuildMode() {
 
 function updateRebuildDialog() {
   const mode = selectedRebuildMode();
-  const selected = [...document.querySelectorAll(".rebuild-window-input:checked")];
-  $("#rebuild-window-panel").classList.toggle("hidden", mode !== "selected");
+  const selected = [...document.querySelectorAll(".rebuild-part-input:checked")];
+  $("#rebuild-part-panel").classList.toggle("hidden", mode !== "selected");
   $("#rebuild-full-warning").classList.toggle("hidden", mode !== "full");
   $("#rebuild-skip-pass0-option").classList.toggle("hidden", mode !== "full");
-  $("#rebuild-selection-summary").textContent = `${selected.length} Window${selected.length === 1 ? "" : "s"} selected`;
+  $("#rebuild-selection-summary").textContent = `${selected.length} Part${selected.length === 1 ? "" : "s"} selected`;
   $("#confirm-rebuild-subtitles").textContent = mode === "full"
     ? "Delete and rebuild everything"
-    : "Rebuild selected Windows";
-  document.querySelectorAll(".rebuild-part").forEach((part) => {
-    const children = [...part.querySelectorAll(".rebuild-window-input")];
-    const checked = children.filter((item) => item.checked).length;
-    const partToggle = part.querySelector(".rebuild-part-input");
-    partToggle.checked = children.length > 0 && checked === children.length;
-    partToggle.indeterminate = checked > 0 && checked < children.length;
-  });
+    : "Rebuild selected Parts";
 }
 
-function renderRebuildWindows(parts) {
-  state.rebuildWindows = parts;
-  $("#rebuild-window-list").innerHTML = parts.map((part) => `
-    <section class="rebuild-part" data-part-id="${part.part_id}">
-      <label class="rebuild-part-head">
-        <input type="checkbox" class="rebuild-part-input" />
-        <strong>Part ${part.part_number}</strong>
-        <span class="muted">Tokens ${part.start_token_id}–${part.end_token_id}</span>
-      </label>
-      <div class="rebuild-part-windows">
-        ${part.windows.map((windowItem) => `
-          <label class="rebuild-window">
-            <input type="checkbox" class="rebuild-window-input"
-              data-batch-id="${windowItem.batch_id}"
-              data-start-token-id="${windowItem.start_token_id}"
-              data-end-token-id="${windowItem.end_token_id}" />
-            <span class="rebuild-window-copy">
-              <span class="rebuild-window-meta"><strong>Window ${windowItem.window_number}</strong> · Tokens ${windowItem.start_token_id}–${windowItem.end_token_id} · ${formatTime(windowItem.start_ms).slice(0, -4)}–${formatTime(windowItem.end_ms).slice(0, -4)}</span>
-              <span class="rebuild-window-preview">${escapeHtml(windowItem.preview)}</span>
-            </span>
-          </label>`).join("")}
-      </div>
-    </section>`).join("");
-  document.querySelectorAll(".rebuild-window-input").forEach((input) => {
-    input.addEventListener("change", updateRebuildDialog);
-  });
+function renderRebuildParts(parts) {
+  state.rebuildParts = parts;
+  $("#rebuild-part-list").innerHTML = parts.map((part) => `
+    <label class="rebuild-part-option">
+      <input type="checkbox" class="rebuild-part-input" data-part-id="${part.part_id}" />
+      <span class="rebuild-part-copy">
+        <span class="rebuild-part-meta"><strong>Part ${part.part_number}</strong> · ${part.cue_count} cues · ${formatTime(part.start_ms).slice(0, -4)}–${formatTime(part.end_ms).slice(0, -4)}</span>
+        <span class="rebuild-part-preview">${escapeHtml(part.preview)}</span>
+      </span>
+    </label>`).join("");
   document.querySelectorAll(".rebuild-part-input").forEach((input) => {
-    input.addEventListener("change", () => {
-      input.closest(".rebuild-part").querySelectorAll(".rebuild-window-input")
-        .forEach((child) => { child.checked = input.checked; });
-      updateRebuildDialog();
-    });
+    input.addEventListener("change", updateRebuildDialog);
   });
   updateRebuildDialog();
 }
@@ -1244,8 +1270,8 @@ async function rebuildSubtitles() {
   const errorBox = $("#rebuild-dialog-error");
   errorBox.classList.add("hidden");
   try {
-    const result = await api(`/api/projects/${state.project.id}/rebuild-windows`);
-    renderRebuildWindows(result.parts || []);
+    const result = await api(`/api/projects/${state.project.id}/rebuild-parts`);
+    renderRebuildParts(result.parts || []);
     const selectedRadio = document.querySelector('input[name="rebuild-mode"][value="selected"]');
     const fullRadio = document.querySelector('input[name="rebuild-mode"][value="full"]');
     const skipPass0 = $("#rebuild-skip-pass0");
@@ -1265,15 +1291,13 @@ async function submitRebuildSubtitles(event) {
   event.preventDefault();
   const mode = selectedRebuildMode();
   const skipPass0 = mode === "full" && $("#rebuild-skip-pass0").checked;
-  const selected = [...document.querySelectorAll(".rebuild-window-input:checked")].map((input) => ({
-    batch_id: Number(input.dataset.batchId),
-    start_token_id: Number(input.dataset.startTokenId),
-    end_token_id: Number(input.dataset.endTokenId),
-  }));
+  const partIds = [...document.querySelectorAll(".rebuild-part-input:checked")].map((input) => (
+    Number(input.dataset.partId)
+  ));
   const errorBox = $("#rebuild-dialog-error");
   errorBox.classList.add("hidden");
-  if (mode === "selected" && !selected.length) {
-    errorBox.textContent = "Select at least one Window.";
+  if (mode === "selected" && !partIds.length) {
+    errorBox.textContent = "Select at least one Part.";
     errorBox.classList.remove("hidden");
     return;
   }
@@ -1285,14 +1309,14 @@ async function submitRebuildSubtitles(event) {
   try {
     await api(`/api/projects/${state.project.id}/rebuild-subtitles`, {
       method: "POST",
-      body: JSON.stringify({ mode, windows: selected, skip_pass0: skipPass0 }),
+      body: JSON.stringify({ mode, part_ids: partIds, skip_pass0: skipPass0 }),
     });
     $("#rebuild-subtitles-dialog").close();
     showToast(mode === "full"
       ? (skipPass0
         ? "Full rebuild queued; existing Pass 0 will be reused"
         : "Old subtitle data cleared; full rebuild queued")
-      : "Selected Windows queued; current subtitles remain until the new result is ready");
+      : "Selected Parts queued; current subtitles remain until the new result is ready");
     await refreshCurrentProject();
   } catch (error) {
     errorBox.textContent = error.message;
@@ -1390,11 +1414,19 @@ async function toggleReviewMode() {
   if (!state.project || !state.reviewIssues.length || projectIsRenderLocked()) return;
   if (!(await flushPendingSegmentSaves())) return;
   if (!state.reviewMode && state.exactPreview.open) await discardExactPreview();
+  const leavingReview = state.reviewMode;
+  const paused = $("#video").paused;
+  const selectedId = state.selectedId;
+  const selectedInIssues = state.reviewIssues.some((issue) => issue.segment_id === selectedId);
   state.reviewMode = !state.reviewMode;
-  state.activeId = null;
-  document.querySelectorAll(".segment-row").forEach((row) => row.classList.remove("active"));
+  state.activeId = leavingReview && paused ? selectedId : null;
+  if (state.activeId == null) {
+    document.querySelectorAll(".segment-row").forEach((row) => row.classList.remove("active"));
+  }
   renderSegments();
   renderProject();
+  const jumpToSelected = paused && selectedId != null && (leavingReview || selectedInIssues);
+  if (jumpToSelected) scrollSegmentListToCenter(selectedId, { instant: true });
 }
 
 function readSubtitleStylePanel() {
@@ -1650,24 +1682,33 @@ function scrollSegmentListTo(segmentId) {
   }
 }
 
+function scrollSegmentListToCenter(segmentId, { toastIfMissing = false, instant = false } = {}) {
+  const list = $("#segment-list");
+  const row = list.querySelector(`.segment-row[data-id="${segmentId}"]`);
+  if (!row) {
+    if (toastIfMissing) showToast("The current subtitle is not visible in this list");
+    return;
+  }
+  const target = row.closest(".review-issue") || row;
+  const listBounds = list.getBoundingClientRect();
+  const rowBounds = target.getBoundingClientRect();
+  const centeredTop = Math.max(
+    0,
+    list.scrollTop
+      + rowBounds.top
+      - listBounds.top
+      - (list.clientHeight - rowBounds.height) / 2,
+  );
+  if (instant) list.scrollTop = centeredTop;
+  else list.scrollTo({ top: centeredTop, behavior: "smooth" });
+}
+
 function scrollToActiveSegment() {
   if (state.activeId === null) {
     showToast("No subtitle is active at the current playback time");
     return;
   }
-  const list = $("#segment-list");
-  const row = list.querySelector(`.segment-row[data-id="${state.activeId}"]`);
-  if (!row) {
-    showToast("The current subtitle is not visible in this list");
-    return;
-  }
-  const listBounds = list.getBoundingClientRect();
-  const rowBounds = row.getBoundingClientRect();
-  const centeredTop = list.scrollTop
-    + rowBounds.top
-    - listBounds.top
-    - (list.clientHeight - rowBounds.height) / 2;
-  list.scrollTo({ top: Math.max(0, centeredTop), behavior: "smooth" });
+  scrollSegmentListToCenter(state.activeId, { toastIfMissing: true });
 }
 
 async function discardExactPreview() {
@@ -1838,12 +1879,12 @@ $("#rebuild-subtitles-form").addEventListener("submit", submitRebuildSubtitles);
 document.querySelectorAll('input[name="rebuild-mode"]').forEach((input) => {
   input.addEventListener("change", updateRebuildDialog);
 });
-$("#select-all-rebuild-windows").addEventListener("click", () => {
-  document.querySelectorAll(".rebuild-window-input").forEach((input) => { input.checked = true; });
+$("#select-all-rebuild-parts").addEventListener("click", () => {
+  document.querySelectorAll(".rebuild-part-input").forEach((input) => { input.checked = true; });
   updateRebuildDialog();
 });
-$("#clear-rebuild-windows").addEventListener("click", () => {
-  document.querySelectorAll(".rebuild-window-input").forEach((input) => { input.checked = false; });
+$("#clear-rebuild-parts").addEventListener("click", () => {
+  document.querySelectorAll(".rebuild-part-input").forEach((input) => { input.checked = false; });
   updateRebuildDialog();
 });
 $("#scroll-to-active").addEventListener("click", scrollToActiveSegment);
@@ -1896,6 +1937,7 @@ $("#subtitle-style-panel").addEventListener("keydown", (event) => {
 });
 $("#translation-provider").addEventListener("change", changeTranslationProvider);
 $("#codex-model").addEventListener("change", changeCodexModel);
+document.addEventListener("keydown", toggleVideoPlaybackFromKeyboard);
 
 window.addEventListener("beforeunload", (event) => {
   if (
