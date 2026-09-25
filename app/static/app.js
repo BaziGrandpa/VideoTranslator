@@ -65,6 +65,7 @@ const stageNames = {
   downloading: "Downloading video and subtitles",
   preparing_subtitles: "Preparing English subtitles",
   reconstructing_timeline: "Reconstructing the word-level timeline",
+  restoring_punctuation: "Restoring English punctuation",
   transcribing: "No subtitles found; transcribing audio",
   building_global_context: "Building global names and terminology",
   waiting_context_review: "Waiting for Pass 0 translation guidance review",

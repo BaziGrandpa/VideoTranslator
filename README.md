@@ -9,15 +9,18 @@ A local-first workbench for translating and burning subtitles into YouTube video
 3. Reconstruct a canonical word-level timeline from rolling YouTube captions.
 4. Use WhisperX word alignment when no English subtitles are available.
 5. Split long videos into balanced, natural-boundary parts of about 30 minutes.
-6. Generate project-wide translation guidance and pause for the user to review its overview,
+6. Before Pass 0, restore punctuation once for each Part whose original English tokens contain
+   zero supported punctuation marks. Store token-ID annotations without changing source words
+   or timestamps; Parts that already have punctuation skip this model request.
+7. Generate project-wide translation guidance and pause for the user to review its overview,
    style, and preferred terminology.
-7. After approval, translate each complete Part (Pass 1), map that Chinese onto Python-cut
+8. After approval, translate each complete Part (Pass 1), map that Chinese onto Python-cut
    English cues (Pass 2), and split Chinese above 24 display units (Pass 3), with Grok Build
    fallback.
-8. Checkpoint completed Parts in SQLite so interrupted or quota-limited runs resume in place.
-9. Normalize display text and validate exact token coverage, timing, duration, and reading speed.
-10. Review both languages and adjust subtitle timing in the browser.
-11. Confirm the timeline, then use FFmpeg to add gradient masks and burn styled ASS subtitles.
+9. Checkpoint completed Parts in SQLite so interrupted or quota-limited runs resume in place.
+10. Normalize display text and validate exact token coverage, timing, duration, and reading speed.
+11. Review both languages and adjust subtitle timing in the browser.
+12. Confirm the timeline, then use FFmpeg to add gradient masks and burn styled ASS subtitles.
 
 The sidebar provider selector supports `Auto: Codex → Grok`, `Codex only`, and `Grok only`.
 The selection is stored per project and is locked while that project is processing. When Codex is
@@ -59,7 +62,7 @@ The default translation order is shown below. Leave model names blank to use the
 TRANSLATION_PROVIDERS=codex,grok
 CODEX_MODEL=gpt-5.6-terra
 GROK_MODEL=
-CODEX_REASONING_EFFORT=low
+CODEX_REASONING_EFFORT=high
 ```
 
 Use manual translation mode when only the review workbench is needed:
@@ -101,6 +104,46 @@ translations, categories, and mandatory-use flags. Save a draft to keep the proj
 choose `Save and continue translation` to approve the guidance and queue Pass 1. The approved
 SQLite value is used by every later translation pass.
 
+## Pass responsibilities and LLM call budget
+
+Each model request must belong to a named Pass with a defined input and output. Fix a failure
+in the Pass that owns it: improve that Pass's prompt, input contract, or validation instead of
+adding an unplanned repair call elsewhere. Do not make an extra LLM call to fill an empty Cue,
+retry a long sentence with different instructions, or silently patch a rejected response.
+
+| Stage | Responsibility | Planned model requests |
+| --- | --- | --- |
+| Punctuation Pass | Before Pass 0, add punctuation after specific original Token IDs in a Part whose original English has zero `, . ? ! : ;` marks. Store the marks separately; never edit Token text or timing. | One request per eligible Part, with no provider fallback or repair call. |
+| Pass 0 | Produce the project overview, style, and terminology for user approval. | One request for up to 12,000 tokens; for longer videos, one per 6,000-token chunk plus one consolidation request. |
+| Pass 1 | Translate one complete Part into continuous Chinese. | One request per Part. |
+| Python Cue cutting | Divide the English Timed Tokens into fixed Cues using explicit punctuation, speaker, pause, and length rules. | None. |
+| Pass 2 | Assign the existing Pass 1 Chinese to every ordered Cue without retranslation or omission. | One request per Part. |
+| Pass 3-1 | Assign token boundaries to long Cues already split at Chinese punctuation by Python. | At most one request per Part when needed. |
+| Pass 3-2 | Split other long Chinese Cues and assign their token boundaries. | At most one request per Part when needed. |
+| Python validation | Check IDs, nonempty Chinese, source coverage, boundaries, timing, and review flags. | None. |
+
+These counts describe the planned requests for one run. The Punctuation Pass uses only the
+first selected provider. For later Passes, `Auto: Codex → Grok` may attempt the next configured
+provider after a failed request; this is provider fallback for the same Pass, not permission
+to add a new repair step. A user-started rebuild is a new run. Any deliberate change to the
+request budget must be documented here alongside its trigger and owning Pass.
+
+The Punctuation Pass prompt includes both the complete Part transcript and its indexed Token
+list. Its response contains only `after_token_id` and one punctuation mark per selected Token.
+Python validates every annotation before committing the whole Part. A failed or interrupted
+request reports its Part and cause, stops before Pass 0, and is not automatically sent again.
+The stored marks form a punctuated reading view for all later Passes and English subtitles;
+the immutable `timed_tokens` rows retain their original words and timestamps. A full subtitle
+rebuild clears this stage and enters the new flow. Existing projects are otherwise left as-is.
+
+Python must apply only explicit, deterministic rules to model output. It may cut source Cues,
+split at Chinese punctuation, calculate timing and flags, and reject invalid results. It must
+not invent, paraphrase, redistribute, or silently fill Chinese text to make a Pass appear to
+succeed. Mechanical boundary estimates are reviewable fallbacks, not evidence that the
+Chinese matches the English. If Pass 2 returns an empty `chinese_sentence`, reject that
+Part's output and inspect Pass 2's prompt and inputs; do not ask another model call or Python
+to supply the missing translation. Apply the same ownership rule to problems in other Passes.
+
 ## Data layout
 
 ```text
@@ -121,7 +164,7 @@ output/
 SQLite stores projects, jobs, immutable timed tokens, subtitle parts, translation contexts,
 and editable subtitle cues. Video files stay in their project directories. Videos up to 40
 minutes use one Part; longer videos use balanced 20–40 minute Parts centered around 30 minutes.
-A Part is the unit for each Pass 1, Pass 2, and Pass 3 model call.
+A Part is the unit for the Punctuation Pass and each Pass 1, Pass 2, and Pass 3 model call.
 
 `Rebuild subtitles` requires browser confirmation. Full rebuild synchronously deletes the old
 Pass 0 context, timed tokens, Parts, and cues before it queues a new Pass 0–3 run. Skip Pass 0

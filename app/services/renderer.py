@@ -111,8 +111,6 @@ def render_project(
     style = write_styled_ass(ass_path, segments, bilingual, subtitle_style)
     version = _next_output_version(output_dir)
     version_suffix = f"v{version:03d}"
-    write_srt(output_dir / f"english-{version_suffix}.srt", segments, "source_text")
-    write_srt(output_dir / f"chinese-{version_suffix}.srt", segments, "translated_text")
 
     width, height = probe_video(video_path)
     # Generate the gradient once and repeat that frame. Applying geq to the source
@@ -121,6 +119,7 @@ def render_project(
     filter_script = render_dir / "filter.ffscript"
     filter_script.write_text(filter_graph, encoding="utf-8")
     output_path = output_dir / f"final-{version_suffix}.mp4"
+    temporary_output_path = output_dir / f".rendering-{version_suffix}.mp4"
     command = [
         settings.ffmpeg_bin,
         "-y",
@@ -149,7 +148,7 @@ def render_project(
         "192k",
         "-movflags",
         "+faststart",
-        str(output_path),
+        str(temporary_output_path),
     ]
     process = subprocess.Popen(
         command,
@@ -172,8 +171,12 @@ def render_project(
     stderr = process.stderr.read() if process.stderr is not None else ""
     return_code = process.wait()
     if return_code != 0:
+        temporary_output_path.unlink(missing_ok=True)
         tail = "\n".join(stderr.splitlines()[-20:])
         raise RuntimeError(f"FFmpeg rendering failed:\n{tail}")
+    write_srt(output_dir / f"english-{version_suffix}.srt", segments, "source_text")
+    write_srt(output_dir / f"chinese-{version_suffix}.srt", segments, "translated_text")
+    temporary_output_path.replace(output_path)
     if progress_callback:
         progress_callback(100)
     return output_path

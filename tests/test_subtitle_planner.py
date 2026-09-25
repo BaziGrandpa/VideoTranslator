@@ -12,9 +12,12 @@ from app.services.subtitle_planner import (
     _normalize_global_context,
     _select_consistency_terms,
     _split_chinese_on_punctuation,
+    generate_global_translation_context,
+    generate_reference_translation,
     split_long_sentences,
 )
 from app.services.subtitle_quality import RULES
+from app.services.translator import _cli_call_label
 
 
 def test_global_context_prompt_uses_plain_project_source_and_name_policy() -> None:
@@ -170,9 +173,58 @@ def test_reference_translation_prompt_has_plain_source_without_token_metadata() 
     assert "Do not use em dashes" in prompt
     assert "Never begin or end the translation or any clause with a dash" in prompt
     assert (
-        f"about {RULES.max_target_units} Chinese characters with no comma, period, or semicolon"
+        f"about {RULES.max_target_units} Chinese characters with no ，。 or ；"
         in prompt
     )
+    assert "Half-width , . ; : ? ! do not count as breaks" in prompt
+
+
+def test_reference_translation_keeps_provider_out_of_the_cli_label(monkeypatch) -> None:
+    labels: list[str] = []
+
+    def fake_grok(_prompt: str) -> str:
+        labels.append(_cli_call_label.get())
+        return "你好"
+
+    monkeypatch.setattr("app.services.subtitle_planner.command_available", lambda _command: True)
+    monkeypatch.setattr("app.services.subtitle_planner.run_grok_text", fake_grok)
+
+    result, provider = generate_reference_translation(
+        [{"text": "Hello"}],
+        "zh-CN",
+        "Title",
+        1,
+        2,
+        providers=("grok",),
+    )
+
+    assert provider == "grok"
+    assert result["reference_translation"] == "你好"
+    assert len(labels) == 1
+    assert labels[0].startswith("Pass 1 via grok (part 1/2")
+
+
+def test_schema_call_keeps_provider_out_of_the_cli_label(monkeypatch) -> None:
+    labels: list[str] = []
+
+    def fake_grok(_prompt: str, _schema_path) -> dict:
+        labels.append(_cli_call_label.get())
+        return {"overview": "Overview", "style": "Natural", "terms": []}
+
+    monkeypatch.setattr("app.services.subtitle_planner.command_available", lambda _command: True)
+    monkeypatch.setattr("app.services.subtitle_planner.run_grok_with_schema", fake_grok)
+
+    context, provider = generate_global_translation_context(
+        [{"text": "Hello"}],
+        "zh-CN",
+        "Title",
+        providers=("grok",),
+    )
+
+    assert provider == "grok"
+    assert context["overview"] == "Overview"
+    assert len(labels) == 1
+    assert labels[0].startswith("Pass 0 via grok")
 
 
 def test_part_pass2_prompt_places_pass1_back_with_adjacent_coherence() -> None:

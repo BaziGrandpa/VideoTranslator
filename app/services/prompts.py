@@ -41,6 +41,32 @@ def global_context_payload(context: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def build_punctuation_prompt(
+    tokens: list[dict[str, Any]], title: str, part_number: int, part_count: int
+) -> str:
+    transcript = " ".join(str(token["normalized_text"]) for token in tokens)
+    indexed = "\n".join(
+        f'{int(token["sequence"])}\t{token["normalized_text"]!s}' for token in tokens
+    )
+    return (
+        "You are the punctuation restoration pass for an English transcript. Read the COMPLETE "
+        "Part transcript first, then use the indexed tokens to identify the exact word after which "
+        "each punctuation mark belongs. The same original words appear in both views. Return only "
+        "punctuation annotations, never rewritten text. Do not add, remove, reorder, correct, "
+        "capitalize, or paraphrase any word. Do not infer missing words. Use only one mark from "
+        "the set . ? ! , : ; after each selected speech token. Choose sentence endings from the "
+        "meaning and grammar of the complete Part, and use commas only where appropriate. "
+        "Keep after_token_id values strictly increasing and unique. Do not mark a speaker or "
+        "stage-direction token. Return JSON matching the schema, with a punctuation array of "
+        "objects containing after_token_id and mark. Do not force a sentence ending merely "
+        "because the Part ends.\n\n"
+        f"{SECURITY_BLOCK}\n\n"
+        f"TITLE: {title}\nPART: {part_number}/{part_count}\n"
+        f"BEGIN COMPLETE PART TRANSCRIPT\n{transcript}\nEND COMPLETE PART TRANSCRIPT\n\n"
+        f"BEGIN INDEXED TOKENS\n{indexed}\nEND INDEXED TOKENS"
+    )
+
+
 def build_global_context_prompt(
     transcript: str,
     target_language: str,
@@ -134,11 +160,11 @@ def build_reference_translation_prompt(
         "audience. Do not summarize, omit, add, explain, annotate, split it into subtitle cues, or "
         "return JSON or Markdown. Return only the complete translated text with normal Chinese "
         "punctuation. Do not use em dashes, en dashes, or Chinese dash pairs such as —, –, or ——. "
-        "Use commas, semicolons, colons, or periods instead. If a clause would run about "
-        f"{RULES.max_target_units} Chinese characters with no comma, period, or semicolon, break it "
-        "at a natural clause boundary with a comma. Keep names, numbers, and fixed expressions "
-        "intact. Keep each piece a real clause, not a chopped phrase. Never begin or end the "
-        "translation or any clause with a dash.\n\n"
+        "Write breaks with the Chinese marks ，。；：？！. Half-width , . ; : ? ! do not count as "
+        f"breaks. If a clause would run about {RULES.max_target_units} Chinese characters with no "
+        "，。 or ；, break it at a natural clause boundary with ，. Keep names, numbers, and fixed "
+        "expressions intact. Keep each piece a real clause, not a chopped phrase. Never begin or "
+        "end the translation or any clause with a dash.\n\n"
         f"{SECURITY_BLOCK}\n\n"
         f"Video title: {title}\nPart: {part_number}/{part_count}\n"
         "GLOBAL PROJECT CONTEXT:\n"
@@ -178,6 +204,11 @@ def build_sentence_alignment_prompt(
         "meaning, and do not paraphrase the same meaning on two neighboring rows. Light rephrasing "
         "is allowed only to sit on a cue boundary. Do not split or merge cues. Do not split for "
         "subtitle length. Follow Pass 0 terms already realized in Pass 1.\n\n"
+        "Every Cue contains spoken English and must receive a nonempty Chinese fragment. "
+        "Never return an empty or whitespace-only chinese_sentence. If a Cue begins or ends "
+        "mid-thought, divide the corresponding Pass 1 wording across the Cue boundary; "
+        "do not place all of its meaning in a neighboring Cue and leave this one blank. "
+        "Check that every source_sentence_id has nonempty Chinese before returning.\n\n"
         "Return exactly one output row for every Cue, in the supplied order. The JSON field "
         "source_sentence_id is the Cue ID. The JSON field chinese_sentence holds that cue's Chinese. "
         "Do not return English, Token IDs, timestamps, commentary, or Markdown. Return only JSON "

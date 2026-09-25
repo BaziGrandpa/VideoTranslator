@@ -292,6 +292,7 @@ def build_part_rebuild_scope(project: dict, requested_part_ids: list[int]) -> di
         "version": 2,
         "run_id": str(uuid.uuid4()),
         "base_subtitle_revision": int(project["subtitle_revision"]),
+        "return_status": project["status"],
         "parts": selected,
     }
 
@@ -401,7 +402,11 @@ def approve_global_translation_context(
         progress=68,
         error=None,
     )
-    job = repository.enqueue_job(project_id, "part_rebuild" if partial else "translate")
+    job = repository.enqueue_job(
+        project_id,
+        "part_rebuild" if partial else "translate",
+        return_status=project["pending_rebuild_scope"].get("return_status") if partial else None,
+    )
     return {"context": context, "job": job}
 
 
@@ -447,26 +452,9 @@ def retry_project(project_id: str) -> dict:
         raise HTTPException(
             status_code=409, detail="Only failed or quota-paused projects can be retried"
         )
-    if isinstance(project.get("pending_rebuild_scope"), dict):
-        kind = "part_rebuild"
-        repository.update_project(
-            project_id,
-            status="queued",
-            stage="part_rebuild_queued",
-            progress=0,
-            error=None,
-        )
-        return repository.enqueue_job(project_id, kind)
-    segments = repository.list_segments(project_id)
     tokens = repository.list_timed_tokens(project_id)
-    if project.get("video_path") and tokens:
+    if project.get("video_path") and (tokens or repository.list_segments(project_id)):
         kind = "translate"
-    elif project.get("video_path") and segments:
-        kind = (
-            "translate"
-            if any(not segment["translated_text"].strip() for segment in segments)
-            else "render"
-        )
     else:
         kind = "prepare"
     repository.update_project(project_id, status="queued", stage="queued", progress=0, error=None)
@@ -527,7 +515,9 @@ def rebuild_subtitles(project_id: str, payload: SubtitleRebuildRequest) -> dict:
     if payload.mode == "selected":
         scope = build_part_rebuild_scope(project, payload.part_ids)
         repository.begin_part_rebuild(project_id, scope)
-        return repository.enqueue_job(project_id, "part_rebuild")
+        return repository.enqueue_job(
+            project_id, "part_rebuild", return_status=project["status"]
+        )
     if payload.skip_pass0 and not isinstance(project.get("global_translation_context"), dict):
         raise HTTPException(status_code=409, detail="Pass 0 has no existing context to reuse")
     # Rebuild is destructive by design. Clear the previous subtitle pipeline state
@@ -741,7 +731,9 @@ def approve_and_render(project_id: str) -> dict:
     repository.update_project(
         project_id, status="queued", stage="render_queued", progress=0, error=None
     )
-    return repository.enqueue_job(project_id, "render")
+    return repository.enqueue_job(
+        project_id, "render", return_status=project["status"]
+    )
 
 
 @app.get("/api/projects/{project_id}/video")

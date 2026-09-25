@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ from app.config import settings
 from app.repository import Repository
 from app.services.caption_tokens import reconstruct_vtt_tokens
 from app.services.downloader import download_youtube
+from app.services.punctuation import source_fingerprint, source_punctuation_count
 from app.services.renderer import render_project
 from app.services.source_sentences import build_source_sentences
 from app.services.subtitle_parts import build_subtitle_parts
@@ -15,6 +17,7 @@ from app.services.subtitle_planner import (
     TranslationQuotaError,
     align_part_sentences,
     generate_global_translation_context,
+    generate_punctuation_annotations,
     generate_reference_translation,
     split_long_sentences,
 )
@@ -25,6 +28,8 @@ from app.services.subtitle_quality import (
     target_units,
 )
 from app.services.transcriber import transcribe_tokens
+
+logger = logging.getLogger(__name__)
 
 
 class Pipeline:
@@ -333,6 +338,15 @@ class Pipeline:
         providers = _provider_sequence(str(project.get("translation_provider") or "auto"))
         codex_model = str(project.get("codex_model") or settings.codex_model)
 
+        if project.get("punctuation_enabled"):
+            parts = self.repository.list_subtitle_parts(project_id)
+            if not parts:
+                plan = build_subtitle_parts(tokens, self._chapter_starts_ms(project_id))
+                self.repository.initialize_subtitle_plan(project_id, plan)
+                parts = self.repository.list_subtitle_parts(project_id)
+            self._prepare_part_punctuation(project, tokens, parts, providers, codex_model)
+            tokens = self.repository.list_timed_tokens(project_id)
+
         global_context = project.get("global_translation_context")
         if not isinstance(global_context, dict):
             self.repository.update_project(
@@ -474,7 +488,7 @@ class Pipeline:
                 for segment in self.repository.list_segments(project_id)
                 if int(segment.get("part_id") or -1) == int(part["id"])
             ]
-            pass2_complete = bool(source_sentences) and all(
+            pass2_complete = bool(source_sentences) and bool(part_segments) and all(
                 str(sentence.get("chinese_sentence", "")).strip()
                 for sentence in source_sentences
             )
@@ -541,10 +555,9 @@ class Pipeline:
                     }
                     for sentence in source_sentences
                 ]
-                self.repository.replace_source_sentences(
-                    project_id, int(part["id"]), source_sentences
+                self.repository.commit_pass2(
+                    project_id, int(part["id"]), source_sentences, part_segments
                 )
-                self.repository.replace_part_segments(project_id, int(part["id"]), part_segments)
                 part_artifacts = self.project_dir(project_id) / "artifacts" / "parts"
                 part_artifacts.mkdir(parents=True, exist_ok=True)
                 part_name = f"part-{part_index + 1:02d}"
@@ -604,6 +617,98 @@ class Pipeline:
             subtitle_revision=max(1, int(project["subtitle_revision"]) + 1),
             error=None,
         )
+
+    def _prepare_part_punctuation(
+        self,
+        project: dict,
+        tokens: list[dict],
+        parts: list[dict],
+        providers: tuple[str, ...],
+        codex_model: str,
+    ) -> None:
+        project_id = str(project["id"])
+        for part_index, part in enumerate(parts, start=1):
+            part_tokens = tokens[int(part["start_token_id"]): int(part["end_token_id"]) + 1]
+            count = source_punctuation_count(part_tokens)
+            if count:
+                logger.info(
+                    "Punctuation Pass skipped: project %s, Part %s/%s, %s original marks in %s tokens",
+                    project_id, part_index, len(parts), count, len(part_tokens),
+                )
+                continue
+            fingerprint = source_fingerprint(part_tokens)
+            saved = self.repository.get_part_punctuation(int(part["id"]))
+            if saved is not None:
+                if saved["source_fingerprint"] != fingerprint:
+                    raise RuntimeError(
+                        f"Punctuation Pass failed — Part {part_index}/{len(parts)}: "
+                        "the original tokens changed; run a full rebuild"
+                    )
+                if saved["status"] == "completed":
+                    logger.info(
+                        "Punctuation Pass reused: project %s, Part %s/%s, %s original marks",
+                        project_id, part_index, len(parts), count,
+                    )
+                    continue
+                raise RuntimeError(
+                    f"Punctuation Pass failed — Part {part_index}/{len(parts)}: "
+                    f"previous request is {saved['status']} ({saved['error'] or 'interrupted'}); "
+                    "no automatic second call; run a full rebuild to retry"
+                )
+            if not providers or providers[0] not in {"codex", "grok", "grokbuild"}:
+                raise RuntimeError(
+                    f"Punctuation Pass failed — Part {part_index}/{len(parts)}: "
+                    "no supported model provider is configured"
+                )
+            provider = providers[0]
+            audit_dir = (
+                self.project_dir(project_id) / "artifacts" / "translation-audit"
+                / f"part-{part_index:02d}-punctuation"
+            )
+            logger.info(
+                "Punctuation Pass required: project %s, Part %s/%s, 0 original marks "
+                "in %s tokens; provider %s; request 1/1",
+                project_id, part_index, len(parts), len(part_tokens), provider,
+            )
+            self.repository.update_project(
+                project_id,
+                status="running",
+                stage="restoring_punctuation",
+                progress=65,
+                pipeline_detail={
+                    "label": "Restoring English punctuation (request 1/1)",
+                    "part": part_index,
+                    "part_count": len(parts),
+                },
+                error=None,
+            )
+            self.repository.begin_part_punctuation(
+                project_id, int(part["id"]), fingerprint, provider
+            )
+            try:
+                marks = generate_punctuation_annotations(
+                    part_tokens,
+                    str(project.get("title") or "Untitled video"),
+                    part_index,
+                    len(parts),
+                    provider,
+                    codex_model,
+                    audit_dir,
+                )
+                self.repository.complete_part_punctuation(int(part["id"]), marks)
+            except Exception as exc:
+                self.repository.fail_part_punctuation(int(part["id"]), str(exc))
+                message = (
+                    f"Punctuation Pass failed — Part {part_index}/{len(parts)}: {exc}; "
+                    f"provider {provider}, request 1/1, no punctuation saved; "
+                    f"Pass 0 not started; audit: {audit_dir}"
+                )
+                logger.error(message)
+                raise RuntimeError(message) from exc
+            logger.info(
+                "Punctuation Pass completed: project %s, Part %s/%s, %s marks validated",
+                project_id, part_index, len(parts), len(marks),
+            )
 
     def _split_part_long_sentences(
         self,

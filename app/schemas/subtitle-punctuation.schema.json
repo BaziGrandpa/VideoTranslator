@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "punctuation": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "after_token_id": { "type": "integer" },
+          "mark": { "type": "string", "enum": [".", "?", "!", ",", ":", ";"] }
+        },
+        "required": ["after_token_id", "mark"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["punctuation"],
+  "additionalProperties": false
+}

@@ -20,7 +20,7 @@ class SubtitleQualityRules:
 
 
 RULES = SubtitleQualityRules()
-PROMPT_VERSION = "sentence-pipeline-v8.4"
+PROMPT_VERSION = "sentence-pipeline-v8.6"
 
 
 def target_units(text: str) -> float:
@@ -133,4 +133,3 @@ def summarize_length_budget(segments: list[dict]) -> dict:
         "over_soft_limit_ratio": round(over_normal / total, 4) if total else 0.0,
         "within_exception_budget": over_normal <= allowed_over_normal,
     }
-

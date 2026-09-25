@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS projects (
     global_translation_context TEXT,
     global_context_provider TEXT,
     global_context_approved INTEGER NOT NULL DEFAULT 1,
+    punctuation_enabled INTEGER NOT NULL DEFAULT 0,
     pending_rebuild_scope TEXT,
     subtitle_revision INTEGER NOT NULL DEFAULT 0,
     rendered_revision INTEGER,
@@ -114,12 +115,24 @@ CREATE TABLE IF NOT EXISTS timed_tokens (
     UNIQUE(project_id, sequence)
 );
 
+CREATE TABLE IF NOT EXISTS part_punctuation (
+    part_id INTEGER PRIMARY KEY REFERENCES subtitle_parts(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    source_fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL,
+    marks_json TEXT,
+    provider TEXT NOT NULL,
+    error TEXT,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,
     status TEXT NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0,
+    return_status TEXT,
     error TEXT,
     created_at TEXT NOT NULL,
     started_at TEXT,
@@ -163,6 +176,7 @@ def connect(database_path: Path | None = None) -> sqlite3.Connection:
 def init_db(database_path: Path | None = None) -> None:
     with connect(database_path) as connection:
         connection.executescript(SCHEMA)
+        _ensure_column(connection, "jobs", "return_status", "TEXT")
         _ensure_column(connection, "segments", "start_token_id", "INTEGER")
         _ensure_column(connection, "segments", "end_token_id", "INTEGER")
         _ensure_column(connection, "segments", "quality_flags", "TEXT NOT NULL DEFAULT '[]'")
@@ -179,6 +193,12 @@ def init_db(database_path: Path | None = None) -> None:
             "projects",
             "global_context_approved",
             "INTEGER NOT NULL DEFAULT 1",
+        )
+        _ensure_column(
+            connection,
+            "projects",
+            "punctuation_enabled",
+            "INTEGER NOT NULL DEFAULT 0",
         )
         _ensure_column(connection, "projects", "pending_rebuild_scope", "TEXT")
         _ensure_column(
@@ -303,7 +323,15 @@ def _ensure_column(
 ) -> None:
     columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
-        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        try:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        except sqlite3.OperationalError:
+            # The API and worker may both run this migration at startup.
+            current = {
+                row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+            if column not in current:
+                raise
 
 
 @contextmanager

@@ -23,7 +23,7 @@ def run_worker(once: bool = False, poll_seconds: float = 1.0) -> None:
     repository = Repository()
     recovered = repository.recover_running_jobs()
     if recovered:
-        logger.warning("Recovered %s interrupted job(s)", recovered)
+        logger.warning("Reconciled %s interrupted job(s)", recovered)
     pipeline = Pipeline(repository)
 
     logger.info("Worker started")
@@ -57,20 +57,26 @@ def run_worker(once: bool = False, poll_seconds: float = 1.0) -> None:
             repository.complete_job(job["id"])
         except TranslationQuotaError as exc:
             logger.warning("Translation paused for quota: %s", exc)
-            repository.fail_job(job["id"], str(exc))
-            repository.update_project(
-                job["project_id"],
-                status="waiting_for_quota",
-                stage="waiting_for_quota",
-                error=str(exc),
-            )
+            if job["kind"] == "part_rebuild":
+                repository.fail_interactive_job(job["id"], str(exc))
+            else:
+                repository.fail_job(job["id"], str(exc))
+                repository.update_project(
+                    job["project_id"],
+                    status="waiting_for_quota",
+                    stage="waiting_for_quota",
+                    error=str(exc),
+                )
         except Exception as exc:
             logger.exception("Job failed")
             error = str(exc)
-            repository.fail_job(job["id"], error)
-            repository.update_project(
-                job["project_id"], status="failed", stage="failed", error=error
-            )
+            if job["kind"] in {"render", "part_rebuild"}:
+                repository.fail_interactive_job(job["id"], error)
+            else:
+                repository.fail_job(job["id"], error)
+                repository.update_project(
+                    job["project_id"], status="failed", stage="failed", error=error
+                )
         if once:
             return
 

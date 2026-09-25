@@ -44,7 +44,7 @@ node --check app/static/app.js
 | Cue | Python-cut English range, numbered from 1 inside a Part | `source_sentence_id` |
 | Sub-cue | One on-screen subtitle row. `sub_id` 0 if unsplit, else 1, 2, 3 | table `segments`; workbench key `segments.id` |
 
-Prompt version: `sentence-pipeline-v8.4` in `app/services/subtitle_quality.py`.
+Prompt version: `sentence-pipeline-v8.6` in `app/services/subtitle_quality.py`.
 JSON fields stay `source_sentence_id` and `chinese_sentence`. Bump the version only when
 prompt wording changes.
 
@@ -57,18 +57,24 @@ A queued job whose kind is still `partial_rebuild` fails and asks for a Part reb
 1. Download the video and English captions, or use WhisperX when captions are missing.
 2. Rebuild Timed Tokens. This layer is never edited.
 3. Split the video into Parts of about 30 minutes (20–40). A video of 40 minutes or less is one Part.
-4. Pass 0 writes the project overview, style, and terminology, then waits for approval.
+4. New projects and full rebuilds create Parts before Pass 0. For each Part with zero original
+   `, . ? ! : ;` marks, the Punctuation Pass calls the first selected provider once to return
+   `after_token_id`/`mark` annotations. Python validates and stores them separately from immutable
+   Timed Tokens. Failed or interrupted requests stop with a visible error and are never
+   automatically sent again. Existing projects enter this stage only after a full rebuild.
+5. Pass 0 reads the punctuated view, writes the project overview, style, and terminology, then
+   waits for approval.
    Videos up to 12,000 tokens use one call. Longer videos use 6,000-token chunks plus one
    consolidation call. That chunking is not stored as Parts.
-5. Pass 1 translates one whole Part into continuous Chinese.
-6. Python cuts that Part into Cues from punctuation, speaker markers, pauses of at least
+6. Pass 1 translates one whole Part into continuous Chinese.
+7. Python cuts that Part into Cues from punctuation, speaker markers, pauses of at least
    1,200 ms, and a 40-word cap.
-7. Pass 2 places the Pass 1 Chinese onto every Cue in the Part. One call. It does not
+8. Pass 2 places the Pass 1 Chinese onto every Cue in the Part. One call. It does not
    retranslate from English. Concatenated Cue Chinese should recover Pass 1.
-8. Pass 3 runs only for Cues whose Chinese exceeds 24 display units. Punctuation splits go to
+9. Pass 3 runs only for Cues whose Chinese exceeds 24 display units. Punctuation splits go to
    Pass 3-1, which only fills `end_token_id`. Other long Cues go to Pass 3-2. Each kind is at
    most one call per Part. Prefer 18 display units when already splitting.
-9. After Pass 3, Python stamps mechanical review flags once.
+10. After Pass 3, Python stamps mechanical review flags once.
 
 ## Rebuild
 

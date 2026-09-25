@@ -179,6 +179,56 @@ def test_pass3_retry_reuses_completed_part_level_pass2(tmp_path: Path, monkeypat
     assert repository.get_project(project["id"])["status"] == "waiting_review"
 
 
+def test_translate_repairs_legacy_pass2_sentences_without_segments(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = tmp_path / "pipeline.db"
+    init_db(database)
+    repository = Repository(database)
+    project = repository.create_project("https://youtu.be/example")
+    project_id = project["id"]
+    repository.update_project(
+        project_id,
+        title="Test video",
+        global_translation_context={"overview": "Context", "style": "Natural", "terms": []},
+        global_context_approved=1,
+    )
+    repository.replace_timed_tokens(project_id, _tokens(4))
+    repository.initialize_subtitle_plan(
+        project_id,
+        [{"start_token_id": 0, "end_token_id": 3, "start_ms": 0, "end_ms": 2000}],
+    )
+    part_id = repository.list_subtitle_parts(project_id)[0]["id"]
+    repository.update_subtitle_part(
+        part_id, source_text="Complete source", reference_translation="完整参考译文"
+    )
+    sentence = {
+        "source_sentence_id": 1,
+        "start_token_id": 0,
+        "end_token_id": 3,
+        "start_ms": 0,
+        "end_ms": 2000,
+        "source_sentence": "word-0 word-1 word-2 word-3.",
+        "chinese_sentence": "旧版半成品中文",
+    }
+    repository.replace_source_sentences(project_id, part_id, [sentence])
+    calls = []
+
+    def fake_align(_tokens, sentences, *_args, **_kwargs):
+        calls.append(1)
+        return ([_segment(sentences[0], "修复后的中文")], "codex")
+
+    monkeypatch.setattr(pipeline_module, "align_part_sentences", fake_align)
+    monkeypatch.setattr(
+        pipeline_module, "settings", replace(pipeline_module.settings, data_dir=tmp_path)
+    )
+    Pipeline(repository).translate(project_id)
+
+    assert calls == [1]
+    assert repository.list_segments(project_id)[0]["translated_text"] == "修复后的中文"
+    assert repository.list_source_sentences(part_id)[0]["chinese_sentence"] == "修复后的中文"
+
+
 def test_part_rebuild_reruns_only_the_selected_part(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "pipeline.db"
     init_db(database)

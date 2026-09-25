@@ -4,11 +4,17 @@ import json
 import sqlite3
 import uuid
 from collections.abc import Iterable
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from app.db import connect, transaction
+from app.services.punctuation import (
+    apply_punctuation,
+    source_fingerprint,
+    validate_punctuation_annotations,
+)
 from app.services.subtitle_style import merge_subtitle_style
 from app.services.subtitle_text import normalize_segment_texts
 
@@ -27,6 +33,7 @@ def decode_project(row: sqlite3.Row) -> dict[str, Any]:
     project = dict(row)
     project["bilingual"] = bool(project["bilingual"])
     project["global_context_approved"] = bool(project["global_context_approved"])
+    project["punctuation_enabled"] = bool(project["punctuation_enabled"])
     try:
         saved_style = json.loads(project.get("subtitle_style") or "null")
     except json.JSONDecodeError:
@@ -79,9 +86,9 @@ class Repository:
                 """
                 INSERT INTO projects (
                     id, source_url, target_language, max_height, bilingual, translation_provider,
-                    codex_model, global_context_approved,
+                    codex_model, global_context_approved, punctuation_enabled,
                     status, stage, progress, subtitle_style, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'queued', 'queued', 0, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, 'queued', 'queued', 0, ?, ?, ?)
                 """,
                 (
                     project_id,
@@ -215,6 +222,7 @@ class Repository:
             "global_translation_context",
             "global_context_provider",
             "global_context_approved",
+            "punctuation_enabled",
             "pending_rebuild_scope",
         }
         values = {key: value for key, value in fields.items() if key in allowed}
@@ -322,6 +330,7 @@ class Repository:
         tokens: Iterable[dict[str, Any]],
     ) -> None:
         with transaction(self.database_path) as connection:
+            connection.execute("DELETE FROM part_punctuation WHERE project_id = ?", (project_id,))
             connection.execute("DELETE FROM timed_tokens WHERE project_id = ?", (project_id,))
             connection.executemany(
                 """
@@ -352,23 +361,111 @@ class Repository:
                 "SELECT * FROM timed_tokens WHERE project_id = ? ORDER BY sequence",
                 (project_id,),
             ).fetchall()
+            punctuation_rows = connection.execute(
+                """
+                SELECT pp.part_id, pp.source_fingerprint, pp.marks_json,
+                       sp.start_token_id, sp.end_token_id
+                FROM part_punctuation pp
+                JOIN subtitle_parts sp ON sp.id = pp.part_id
+                WHERE pp.project_id = ? AND pp.status = 'completed'
+                ORDER BY sp.sequence
+                """,
+                (project_id,),
+            ).fetchall()
         tokens = [dict(row) for row in rows]
         for token in tokens:
             token["text"] = token["normalized_text"]
             token["timing_inferred"] = bool(token["timing_inferred"])
+        marks: list[dict[str, Any]] = []
+        for row in punctuation_rows:
+            part_tokens = tokens[int(row["start_token_id"]): int(row["end_token_id"]) + 1]
+            if source_fingerprint(part_tokens) != row["source_fingerprint"]:
+                raise RuntimeError(f"Punctuation source changed for Part ID {row['part_id']}")
+            parsed = json.loads(str(row["marks_json"]))
+            marks.extend(validate_punctuation_annotations(part_tokens, {"punctuation": parsed}))
+        if marks:
+            tokens = apply_punctuation(tokens, marks)
         return tokens
+
+    def get_part_punctuation(self, part_id: int) -> dict[str, Any] | None:
+        with connect(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT * FROM part_punctuation WHERE part_id = ?", (part_id,)
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def begin_part_punctuation(
+        self, project_id: str, part_id: int, fingerprint: str, provider: str
+    ) -> None:
+        with transaction(self.database_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO part_punctuation (
+                    part_id, project_id, source_fingerprint, status, marks_json,
+                    provider, error, updated_at
+                ) VALUES (?, ?, ?, 'requested', NULL, ?, NULL, ?)
+                """,
+                (part_id, project_id, fingerprint, provider, now_iso()),
+            )
+
+    def complete_part_punctuation(self, part_id: int, marks: list[dict[str, Any]]) -> None:
+        with transaction(self.database_path) as connection:
+            part = connection.execute(
+                """
+                SELECT pp.project_id, pp.source_fingerprint, sp.start_token_id, sp.end_token_id
+                FROM part_punctuation pp JOIN subtitle_parts sp ON sp.id = pp.part_id
+                WHERE pp.part_id = ? AND pp.status = 'requested'
+                """,
+                (part_id,),
+            ).fetchone()
+            if part is None:
+                raise RuntimeError(f"Punctuation request for Part ID {part_id} is not active")
+            rows = connection.execute(
+                """
+                SELECT * FROM timed_tokens
+                WHERE project_id = ? AND sequence BETWEEN ? AND ? ORDER BY sequence
+                """,
+                (part["project_id"], part["start_token_id"], part["end_token_id"]),
+            ).fetchall()
+            tokens = [{**dict(row), "text": row["normalized_text"]} for row in rows]
+            if source_fingerprint(tokens) != part["source_fingerprint"]:
+                raise RuntimeError(f"Punctuation source changed for Part ID {part_id}")
+            validated = validate_punctuation_annotations(tokens, {"punctuation": marks})
+            changed = connection.execute(
+                """
+                UPDATE part_punctuation
+                SET status = 'completed', marks_json = ?, error = NULL, updated_at = ?
+                WHERE part_id = ? AND status = 'requested'
+                """,
+                (json.dumps(validated, ensure_ascii=False), now_iso(), part_id),
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError(f"Punctuation request for Part ID {part_id} is not active")
+
+    def fail_part_punctuation(self, part_id: int, error: str) -> None:
+        with transaction(self.database_path) as connection:
+            connection.execute(
+                """
+                UPDATE part_punctuation
+                SET status = 'failed', error = ?, updated_at = ?
+                WHERE part_id = ? AND status = 'requested'
+                """,
+                (error, now_iso(), part_id),
+            )
 
     def replace_source_sentences(
         self,
         project_id: str,
         part_id: int,
         sentences: Iterable[dict[str, Any]],
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> None:
         timestamp = now_iso()
         rows = list(sentences)
-        with transaction(self.database_path) as connection:
-            connection.execute("DELETE FROM source_sentences WHERE part_id = ?", (part_id,))
-            connection.executemany(
+        with (transaction(self.database_path) if connection is None else nullcontext(connection)) as db:
+            db.execute("DELETE FROM source_sentences WHERE part_id = ?", (part_id,))
+            db.executemany(
                 """
                 INSERT INTO source_sentences (
                     project_id, part_id, source_sentence_id, start_token_id, end_token_id,
@@ -437,6 +534,7 @@ class Repository:
                 UPDATE projects
                 SET status = 'queued', stage = 'queued', progress = 0, error = NULL,
                     pipeline_detail = NULL,
+                    punctuation_enabled = 1,
                     subtitle_revision = 0, rendered_revision = NULL, output_path = NULL,
                     {context_reset}
                     pending_rebuild_scope = NULL,
@@ -880,6 +978,8 @@ class Repository:
         project_id: str,
         part_id: int,
         segments: Iterable[dict[str, Any]],
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> None:
         timestamp = now_iso()
         rows = []
@@ -892,15 +992,15 @@ class Repository:
                 continue
             rows.append((segment, source_text, translated_text))
 
-        with transaction(self.database_path) as connection:
-            connection.execute("DELETE FROM segments WHERE part_id = ?", (part_id,))
+        with (transaction(self.database_path) if connection is None else nullcontext(connection)) as db:
+            db.execute("DELETE FROM segments WHERE part_id = ?", (part_id,))
             next_sequence = int(
-                connection.execute(
+                db.execute(
                     "SELECT COALESCE(MAX(sequence), -1) + 1 FROM segments WHERE project_id = ?",
                     (project_id,),
                 ).fetchone()[0]
             )
-            connection.executemany(
+            db.executemany(
                 """
                 INSERT INTO segments (
                     project_id, sequence, start_ms, end_ms, source_text,
@@ -928,18 +1028,44 @@ class Repository:
                     for index, (segment, source_text, translated_text) in enumerate(rows)
                 ],
             )
-            ordered = connection.execute(
+            ordered = db.execute(
                 "SELECT id FROM segments WHERE project_id = ? ORDER BY start_ms, id",
                 (project_id,),
             ).fetchall()
-            connection.execute(
+            db.execute(
                 "UPDATE segments SET sequence = sequence + 1000000 WHERE project_id = ?",
                 (project_id,),
             )
-            connection.executemany(
+            db.executemany(
                 "UPDATE segments SET sequence = ? WHERE id = ?",
                 [(index, row["id"]) for index, row in enumerate(ordered)],
             )
+
+    def commit_pass2(
+        self,
+        project_id: str,
+        part_id: int,
+        sentences: Iterable[dict[str, Any]],
+        segments: Iterable[dict[str, Any]],
+    ) -> None:
+        """Publish aligned sentences, cues, and their checkpoint together."""
+        with transaction(self.database_path) as connection:
+            self.replace_source_sentences(
+                project_id, part_id, sentences, connection=connection
+            )
+            self.replace_part_segments(
+                project_id, part_id, segments, connection=connection
+            )
+            changed = connection.execute(
+                """
+                UPDATE subtitle_parts
+                SET status = 'pass2_complete', error = NULL, updated_at = ?
+                WHERE project_id = ? AND id = ?
+                """,
+                (now_iso(), project_id, part_id),
+            ).rowcount
+            if changed != 1:
+                raise KeyError(part_id)
 
     def normalize_existing_segments(self, project_id: str | None = None) -> int:
         changed = 0
@@ -961,7 +1087,9 @@ class Repository:
                     changed += 1
         return changed
 
-    def enqueue_job(self, project_id: str, kind: str) -> dict[str, Any]:
+    def enqueue_job(
+        self, project_id: str, kind: str, *, return_status: str | None = None
+    ) -> dict[str, Any]:
         job_id = str(uuid.uuid4())
         with transaction(self.database_path) as connection:
             active = connection.execute(
@@ -978,10 +1106,10 @@ class Repository:
                 return dict(row)
             connection.execute(
                 """
-                INSERT INTO jobs (id, project_id, kind, status, created_at)
-                VALUES (?, ?, ?, 'queued', ?)
+                INSERT INTO jobs (id, project_id, kind, status, return_status, created_at)
+                VALUES (?, ?, ?, 'queued', ?, ?)
                 """,
-                (job_id, project_id, kind, now_iso()),
+                (job_id, project_id, kind, return_status, now_iso()),
             )
         return self.get_job(job_id)
 
@@ -1025,9 +1153,100 @@ class Repository:
                 (now_iso(), error, job_id),
             )
 
+    def fail_interactive_job(self, job_id: str, error: str) -> None:
+        """Finish a render or selected-Part test without failing the project."""
+        with transaction(self.database_path) as connection:
+            job = connection.execute(
+                "SELECT * FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if job is None:
+                raise KeyError(job_id)
+            if job["kind"] not in {"render", "part_rebuild"}:
+                raise ValueError(f"Not an interactive job: {job['kind']}")
+            self._fail_interactive_job(connection, job, error)
+
+    @staticmethod
+    def _fail_interactive_job(
+        connection: sqlite3.Connection, job: sqlite3.Row, error: str
+    ) -> None:
+        project = connection.execute(
+            "SELECT output_path FROM projects WHERE id = ?", (job["project_id"],)
+        ).fetchone()
+        if project is None:
+            raise KeyError(job["project_id"])
+        return_status = job["return_status"]
+        if return_status not in {"waiting_review", "completed"}:
+            return_status = "completed" if project["output_path"] else "waiting_review"
+        timestamp = now_iso()
+        connection.execute(
+            """
+            UPDATE jobs SET status = 'failed', finished_at = ?, error = ? WHERE id = ?
+            """,
+            (timestamp, error, job["id"]),
+        )
+        connection.execute(
+            """
+            UPDATE projects
+            SET status = ?, stage = ?, progress = 100, pipeline_detail = NULL,
+                pending_rebuild_scope = CASE WHEN ? = 'part_rebuild'
+                    THEN NULL ELSE pending_rebuild_scope END,
+                error = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                return_status,
+                return_status,
+                job["kind"],
+                error,
+                timestamp,
+                job["project_id"],
+            ),
+        )
+
     def recover_running_jobs(self) -> int:
         with transaction(self.database_path) as connection:
+            interactive = connection.execute(
+                """
+                SELECT * FROM jobs
+                WHERE status = 'running' AND kind IN ('render', 'part_rebuild')
+                """
+            ).fetchall()
+            for job in interactive:
+                project = connection.execute(
+                    """
+                    SELECT status, stage, output_path, rendered_revision,
+                           pending_rebuild_scope
+                    FROM projects WHERE id = ?
+                    """,
+                    (job["project_id"],),
+                ).fetchone()
+                render_published = (
+                    job["kind"] == "render"
+                    and project is not None
+                    and project["status"] == "completed"
+                    and project["stage"] == "completed"
+                    and project["output_path"]
+                    and project["rendered_revision"] is not None
+                )
+                part_published = (
+                    job["kind"] == "part_rebuild"
+                    and project is not None
+                    and project["status"] == "waiting_review"
+                    and project["pending_rebuild_scope"] is None
+                )
+                if render_published or part_published:
+                    connection.execute(
+                        """
+                        UPDATE jobs SET status = 'completed', finished_at = ?, error = NULL
+                        WHERE id = ?
+                        """,
+                        (now_iso(), job["id"]),
+                    )
+                else:
+                    self._fail_interactive_job(
+                        connection, job, "Interrupted while the worker was stopped"
+                    )
             cursor = connection.execute(
                 "UPDATE jobs SET status = 'queued', started_at = NULL WHERE status = 'running'"
             )
-            return cursor.rowcount
+            return len(interactive) + cursor.rowcount

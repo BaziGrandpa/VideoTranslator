@@ -11,11 +11,14 @@ from app.config import command_available, settings
 from app.services.prompts import (
     build_global_context_consolidation_prompt,
     build_global_context_prompt,
+    build_punctuation_prompt,
     build_reference_translation_prompt,
     build_sentence_alignment_prompt,
     build_sentence_boundary_prompt,
     build_sentence_split_prompt,
 )
+from app.services.punctuation import PROMPT_VERSION as PUNCTUATION_PROMPT_VERSION
+from app.services.punctuation import validate_punctuation_annotations
 from app.services.source_sentences import (
     classify_token_kinds,
     materialize_aligned_sentences,
@@ -26,6 +29,8 @@ from app.services.subtitle_quality import PASS3_INVALID_OUTPUT, RULES, target_un
 from app.services.subtitle_text import normalize_source_text, normalize_translated_text
 from app.services.translation_audit import call_metadata, record_event
 from app.services.translator import (
+    activate_cli_call,
+    deactivate_cli_call,
     run_codex_text,
     run_codex_with_schema,
     run_grok_text,
@@ -37,6 +42,7 @@ SENTENCE_ALIGNMENT_SCHEMA_PATH = SCHEMA_DIR / "subtitle-sentence-alignments.sche
 SENTENCE_SPLIT_SCHEMA_PATH = SCHEMA_DIR / "subtitle-sentence-splits.schema.json"
 SENTENCE_BOUNDARY_SCHEMA_PATH = SCHEMA_DIR / "subtitle-sentence-boundaries.schema.json"
 GLOBAL_CONTEXT_SCHEMA_PATH = SCHEMA_DIR / "global-translation-context.schema.json"
+PUNCTUATION_SCHEMA_PATH = SCHEMA_DIR / "subtitle-punctuation.schema.json"
 QUOTA_RE = re.compile(r"quota|usage.?limit|rate.?limit|too many requests", re.IGNORECASE)
 logger = logging.getLogger(__name__)
 GLOBAL_CONTEXT_DIRECT_TOKEN_LIMIT = 12_000
@@ -47,6 +53,48 @@ GLOBAL_CONTEXT_CHUNK_TERM_LIMIT = 60
 
 class TranslationQuotaError(RuntimeError):
     """All configured local CLIs are temporarily blocked by a quota or rate limit."""
+
+
+def generate_punctuation_annotations(
+    tokens: list[dict[str, Any]],
+    title: str,
+    part_number: int,
+    part_count: int,
+    provider: str,
+    codex_model: str | None = None,
+    audit_dir: Path | None = None,
+) -> list[dict[str, Any]]:
+    """One provider invocation for one Part; invalid output is never repaired or retried."""
+    prompt = build_punctuation_prompt(tokens, title, part_number, part_count)
+    result = _audited_call(
+        provider,
+        prompt,
+        PUNCTUATION_SCHEMA_PATH,
+        codex_model,
+        audit_dir,
+        stage="punctuation-restoration",
+        part=[part_number, part_count],
+        punctuation_prompt_version=PUNCTUATION_PROMPT_VERSION,
+    )
+    try:
+        marks = validate_punctuation_annotations(tokens, result)
+    except (TypeError, ValueError) as exc:
+        record_event(
+            audit_dir,
+            "punctuation-validation-error",
+            error=str(exc),
+            part=[part_number, part_count],
+            punctuation_prompt_version=PUNCTUATION_PROMPT_VERSION,
+        )
+        raise
+    record_event(
+        audit_dir,
+        "punctuation-validated",
+        marks=marks,
+        part=[part_number, part_count],
+        punctuation_prompt_version=PUNCTUATION_PROMPT_VERSION,
+    )
+    return marks
 
 
 def generate_reference_translation(
@@ -117,6 +165,11 @@ def _call_providers(
     )
 
 
+def _without_provider(fields: dict[str, Any]) -> dict[str, Any]:
+    """Audit records keep provider; the CLI label already receives it positionally."""
+    return {key: value for key, value in fields.items() if key != "provider"}
+
+
 def _call_text(
     prompt: str,
     providers: tuple[str, ...] | None,
@@ -129,6 +182,7 @@ def _call_text(
     def invoke(provider: str) -> str:
         fields = {**call_metadata(provider, codex_model), **fields_base}
         record_event(audit_dir, "request", prompt=prompt, **fields)
+        token = activate_cli_call(provider, **_without_provider(fields))
         try:
             if provider == "codex":
                 if not command_available(settings.codex_cli):
@@ -143,6 +197,8 @@ def _call_text(
         except Exception as exc:
             record_event(audit_dir, "call-error", error=str(exc), **fields)
             raise
+        finally:
+            deactivate_cli_call(token)
         return raw
 
     return _call_with_providers(
@@ -207,11 +263,14 @@ def _audited_call(
 ) -> dict[str, Any]:
     fields = {**call_metadata(provider, codex_model), **metadata}
     record_event(audit_dir, "request", prompt=prompt, schema=schema_path.name, **fields)
+    token = activate_cli_call(provider, **_without_provider(fields))
     try:
         result = _call_provider(provider, prompt, schema_path, codex_model)
     except Exception as exc:
         record_event(audit_dir, "call-error", error=str(exc), **fields)
         raise
+    finally:
+        deactivate_cli_call(token)
     record_event(audit_dir, "response", result=result, **fields)
     return result
 
@@ -273,6 +332,7 @@ def generate_global_translation_context(
             codex_model,
             audit_dir / f"chunk-{chunk_index:02d}" if audit_dir else None,
             stage="context",
+            chunk=f"{chunk_index}/{chunk_count}",
         )
         candidates.append(
             _normalize_global_context(candidate, term_limit=GLOBAL_CONTEXT_CHUNK_TERM_LIMIT)
@@ -296,6 +356,7 @@ def generate_global_translation_context(
         codex_model,
         audit_dir / "consolidation" if audit_dir else None,
         stage="context",
+        chunk="consolidation",
     )
     record_event(
         audit_dir,
@@ -489,7 +550,7 @@ def align_part_sentences(
     message = "; ".join(errors)
     if errors and quota_errors == len(errors):
         raise TranslationQuotaError(message)
-    raise RuntimeError("All local Pass 2 CLIs failed: " + message)
+    raise RuntimeError("Pass 2 alignment failed for configured providers: " + message)
 
 
 def split_long_sentences(
