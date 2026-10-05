@@ -3,6 +3,8 @@ from __future__ import annotations
 import unicodedata
 from dataclasses import asdict, dataclass
 
+from app.services.subtitle_text import display_translated_text
+
 
 @dataclass(frozen=True)
 class SubtitleQualityRules:
@@ -13,6 +15,7 @@ class SubtitleQualityRules:
     normal_max_target_units: int = 18
     max_target_units: int = 24
     allowed_over_normal_ratio: float = 0.02
+    min_long_cue_units_per_second: float = 2.5
     max_target_units_per_second: float = 12.0
 
     def payload(self) -> dict:
@@ -20,14 +23,14 @@ class SubtitleQualityRules:
 
 
 RULES = SubtitleQualityRules()
-PROMPT_VERSION = "sentence-pipeline-v8.6"
+PROMPT_VERSION = "sentence-pipeline-v8.10"
 
 
 def target_units(text: str) -> float:
     """Approximate display load: wide characters count as 1, others as 0.5."""
     return sum(
         1.0 if unicodedata.east_asian_width(char) in {"W", "F"} else 0.5
-        for char in text
+        for char in display_translated_text(text)
         if not char.isspace()
     )
 
@@ -35,6 +38,7 @@ def target_units(text: str) -> float:
 def quality_issues(start_ms: int, end_ms: int, source: str, target: str) -> list[dict]:
     duration = max(1, end_ms - start_ms)
     units = target_units(target)
+    units_per_second = units * 1000 / duration
     issues = []
 
     def add(kind: str, actual: float, limit: float) -> None:
@@ -44,10 +48,13 @@ def quality_issues(start_ms: int, end_ms: int, source: str, target: str) -> list
         len(source.split()) > RULES.short_source_words or units > RULES.short_target_units
     ):
         add("very_short_duration", duration, RULES.short_duration_ms)
-    if duration > RULES.max_duration_ms:
+    if (
+        duration > RULES.max_duration_ms
+        and units_per_second < RULES.min_long_cue_units_per_second
+    ):
         add("very_long_duration", duration, RULES.max_duration_ms)
-    if units and units * 1000 / duration > RULES.max_target_units_per_second:
-        add("high_target_reading_speed", units * 1000 / duration, RULES.max_target_units_per_second)
+    if units and units_per_second > RULES.max_target_units_per_second:
+        add("high_target_reading_speed", units_per_second, RULES.max_target_units_per_second)
     if units > RULES.max_target_units:
         add("target_text_too_long", units, RULES.max_target_units)
     return issues
@@ -104,7 +111,10 @@ def describe_review_problems(problems: list[dict]) -> str:
         elif kind == "very_short_duration":
             parts.append(f"Duration {actual} ms is below {limit} ms.")
         elif kind == "very_long_duration":
-            parts.append(f"Duration {actual} ms exceeds {limit} ms.")
+            parts.append(
+                f"Duration {actual} ms exceeds {limit} ms, with fewer than "
+                f"{RULES.min_long_cue_units_per_second} display units/s."
+            )
         elif kind == "high_target_reading_speed":
             parts.append(f"Reading speed is {actual} units/s; the limit is {limit}.")
         elif kind == PASS3_INVALID_OUTPUT:

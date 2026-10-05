@@ -123,6 +123,65 @@ def test_translate_saves_part_level_pass2_and_pass3_results(tmp_path: Path, monk
     assert repository.get_project(project["id"])["status"] == "waiting_review"
 
 
+def test_pass3_finalize_merges_short_chinese_cue_before_storage(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repository = Repository(tmp_path / "pipeline.db")
+    init_db(repository.database_path)
+    project = repository.create_project("https://youtu.be/example")
+    repository.replace_timed_tokens(
+        project["id"],
+        [
+            {"text": "before,", "start_ms": 0, "end_ms": 1000, "source": "test"},
+            {"text": "after.", "start_ms": 1000, "end_ms": 2000, "source": "test"},
+        ],
+    )
+    repository.initialize_subtitle_plan(
+        project["id"],
+        [{"start_token_id": 0, "end_token_id": 1, "start_ms": 0, "end_ms": 2000}],
+    )
+    part = repository.list_subtitle_parts(project["id"])[0]
+    sentences = [
+        {
+            "source_sentence_id": index + 1,
+            "start_token_id": index,
+            "end_token_id": index,
+            "start_ms": index * 1000,
+            "end_ms": (index + 1) * 1000,
+            "source_sentence": word,
+            "chinese_sentence": chinese,
+        }
+        for index, (word, chinese) in enumerate(
+            [("before,", "前文"), ("after.", "看你。")]
+        )
+    ]
+    repository.replace_source_sentences(project["id"], part["id"], sentences)
+    repository.replace_part_segments(
+        project["id"], part["id"],
+        [_segment(sentence, sentence["chinese_sentence"]) for sentence in sentences],
+    )
+    monkeypatch.setattr(
+        pipeline_module, "settings", replace(pipeline_module.settings, data_dir=tmp_path)
+    )
+
+    Pipeline(repository)._split_part_long_sentences(
+        repository.get_project(project["id"]),
+        part,
+        repository.list_timed_tokens(project["id"]),
+        repository.list_source_sentences(part["id"]),
+        {},
+        ("codex",),
+        "test-model",
+    )
+
+    saved = repository.list_segments(project["id"])
+    assert len(saved) == 1
+    assert saved[0]["translated_text"] == "前文看你。"
+    assert (saved[0]["start_token_id"], saved[0]["end_token_id"]) == (0, 1)
+    assert saved[0]["source_sentence_id"] == 1
+    assert [item["source_sentence_id"] for item in repository.list_source_sentences(part["id"])] == [1, 2]
+
+
 def test_pass3_retry_reuses_completed_part_level_pass2(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "pipeline.db"
     init_db(database)
@@ -251,10 +310,21 @@ def test_part_rebuild_reruns_only_the_selected_part(tmp_path: Path, monkeypatch)
     )
     parts = repository.list_subtitle_parts(project["id"])
     for part in parts:
-        repository.replace_source_sentences(
-            project["id"],
-            part["id"],
+        source_rows = (
             [
+                {
+                    "source_sentence_id": index + 1,
+                    "start_token_id": start,
+                    "end_token_id": end,
+                    "start_ms": start * 500,
+                    "end_ms": (end + 1) * 500,
+                    "source_sentence": f"Part {part['sequence']} cue {index + 1}",
+                    "chinese_sentence": "旧译文",
+                }
+                for index, (start, end) in enumerate([(10, 15), (16, 19)])
+            ]
+            if part["sequence"] == 1
+            else [
                 {
                     "source_sentence_id": 1,
                     "start_token_id": part["start_token_id"],
@@ -264,23 +334,15 @@ def test_part_rebuild_reruns_only_the_selected_part(tmp_path: Path, monkeypatch)
                     "source_sentence": f"Part {part['sequence']}",
                     "chinese_sentence": "旧译文",
                 }
-            ],
+            ]
+        )
+        repository.replace_source_sentences(
+            project["id"], part["id"], source_rows,
         )
         repository.replace_part_segments(
             project["id"],
             part["id"],
-            [
-                {
-                    "start_ms": part["start_ms"],
-                    "end_ms": part["end_ms"],
-                    "start_token_id": part["start_token_id"],
-                    "end_token_id": part["end_token_id"],
-                    "source_sentence_id": 1,
-                    "sub_id": 0,
-                    "source_text": f"Part {part['sequence']}",
-                    "translated_text": f"旧译文{part['sequence']}",
-                }
-            ],
+            [_segment(sentence, f"旧译文{part['sequence']}") for sentence in source_rows],
         )
     selected = parts[1]
     repository.begin_part_rebuild(
@@ -306,7 +368,13 @@ def test_part_rebuild_reruns_only_the_selected_part(tmp_path: Path, monkeypatch)
         return ({"source_text": "Selected part", "reference_translation": "新的整段译文"}, "codex")
 
     def fake_align(_tokens, sentences, *_args, **_kwargs):
-        return ([_segment(item, "新译文") for item in sentences], "codex")
+        return (
+            [
+                _segment(item, "他们可能会用居高临下的态度" if index == 0 else "看你。")
+                for index, item in enumerate(sentences)
+            ],
+            "codex",
+        )
 
     def fail_split(*_args, **_kwargs):
         raise AssertionError("Pass 3 should not run for a short cue")
@@ -325,7 +393,9 @@ def test_part_rebuild_reruns_only_the_selected_part(tmp_path: Path, monkeypatch)
     by_part = {int(segment["part_id"]): segment["translated_text"] for segment in segments}
     assert pass1_calls == [1]
     assert by_part[parts[0]["id"]] == "旧译文0"
-    assert by_part[parts[1]["id"]] == "新译文"
+    assert by_part[parts[1]["id"]] == "他们可能会用居高临下的态度看你。"
+    assert [item["source_sentence_id"] for item in repository.list_source_sentences(parts[1]["id"])] == [1, 2]
+    assert [item["sequence"] for item in segments] == [0, 1]
     assert saved["global_translation_context"] == context
     assert saved["global_context_approved"] is True
     assert saved["pending_rebuild_scope"] is None

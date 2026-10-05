@@ -20,13 +20,19 @@ from app.services.prompts import (
 from app.services.punctuation import PROMPT_VERSION as PUNCTUATION_PROMPT_VERSION
 from app.services.punctuation import validate_punctuation_annotations
 from app.services.source_sentences import (
+    LONG_PAUSE_MS,
     classify_token_kinds,
     materialize_aligned_sentences,
     materialize_sentence_splits,
+    visible_source_text,
     visible_token_ids,
 )
 from app.services.subtitle_quality import PASS3_INVALID_OUTPUT, RULES, target_units
-from app.services.subtitle_text import normalize_source_text, normalize_translated_text
+from app.services.subtitle_text import (
+    display_translated_text,
+    normalize_source_text,
+    normalize_translated_text,
+)
 from app.services.translation_audit import call_metadata, record_event
 from app.services.translator import (
     activate_cli_call,
@@ -49,6 +55,9 @@ GLOBAL_CONTEXT_DIRECT_TOKEN_LIMIT = 12_000
 GLOBAL_CONTEXT_CHUNK_TOKENS = 6_000
 GLOBAL_CONTEXT_TERM_LIMIT = 40
 GLOBAL_CONTEXT_CHUNK_TERM_LIMIT = 60
+SHORT_SUBCUE_SPEECH_TOKENS = 3
+SHORT_CHINESE_CUE_CHARS = 3
+CHINESE_SENTENCE_END_RE = re.compile(r"[。.][\"'”’》」』】）)]*$")
 
 
 class TranslationQuotaError(RuntimeError):
@@ -651,12 +660,14 @@ def split_long_sentences(
                 )
 
             segments = _assemble_sentence_split_results(parent_segments, accepted, invalid)
+            segments, short_token_merges = _merge_short_token_subcues(tokens, segments)
             record_event(
                 audit_dir,
                 "long-sentence-splits-finalized",
                 token_range=_parent_token_range(parent_segments),
                 source_sentence_count=len(parent_segments),
                 manual_review_source_sentence_ids=sorted(invalid),
+                short_token_subcue_merges=short_token_merges,
                 segments=segments,
             )
             return segments, provider
@@ -716,6 +727,159 @@ def _split_chinese_on_punctuation(value: str) -> list[str] | None:
             changed = True
             break
     return [normalize_translated_text(piece) for piece in pieces]
+
+
+def _merge_short_token_subcues(
+    tokens: list[dict[str, Any]], segments: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], dict[int, int]]:
+    """Absorb short timing spans within a parent when the Chinese still fits."""
+    rows = [dict(segment) for segment in segments]
+    kinds = classify_token_kinds(tokens)
+    merge_counts: dict[int, int] = {}
+    index = 0
+    while index < len(rows):
+        current = rows[index]
+        if int(current.get("sub_id") or 0) == 0:
+            index += 1
+            continue
+        speech_count = len(visible_token_ids(
+            tokens, int(current["start_token_id"]), int(current["end_token_id"]), kinds
+        ))
+        if speech_count > SHORT_SUBCUE_SPEECH_TOKENS:
+            index += 1
+            continue
+
+        candidates: list[tuple[bool, float, bool, int, str]] = []
+        for neighbor in (index - 1, index + 1):
+            if not 0 <= neighbor < len(rows):
+                continue
+            other = rows[neighbor]
+            if (
+                int(other.get("sub_id") or 0) == 0
+                or other["source_sentence_id"] != current["source_sentence_id"]
+            ):
+                continue
+            left_index = min(index, neighbor)
+            left, right = rows[left_index : left_index + 2]
+            left_text = str(left["translated_text"])
+            separator = "" if left_text.endswith(
+                ("，", "。", "！", "？", "；", "：", ",", ".", "!", "?", ";", ":")
+            ) else "，"
+            chinese = normalize_translated_text(
+                f"{left_text}{separator}{right['translated_text']}"
+            )
+            units = target_units(chinese)
+            if units > RULES.max_target_units:
+                continue
+            speech_count = len(
+                visible_token_ids(
+                    tokens, int(left["start_token_id"]), int(right["end_token_id"]), kinds
+                )
+            )
+            candidates.append(
+                (
+                    speech_count <= SHORT_SUBCUE_SPEECH_TOKENS,
+                    units,
+                    neighbor > index,
+                    left_index,
+                    chinese,
+                )
+            )
+        if not candidates:
+            index += 1
+            continue
+
+        _, _, _, left_index, chinese = min(candidates)
+        left, right = rows[left_index : left_index + 2]
+        start = int(left["start_token_id"])
+        end = int(right["end_token_id"])
+        rows[left_index : left_index + 2] = [
+            {
+                **left,
+                "end_ms": right["end_ms"],
+                "end_token_id": end,
+                "source_text": visible_source_text(tokens, start, end, kinds),
+                "translated_text": chinese,
+                "quality_flags": list(dict.fromkeys(
+                    [*(left.get("quality_flags") or []), *(right.get("quality_flags") or [])]
+                )),
+            }
+        ]
+        sentence_id = int(left["source_sentence_id"])
+        merge_counts[sentence_id] = merge_counts.get(sentence_id, 0) + 1
+        index = max(0, left_index - 1)
+
+    previous_sentence_id: int | None = None
+    sub_id = 0
+    for row in rows:
+        sentence_id = int(row["source_sentence_id"])
+        if sentence_id != previous_sentence_id:
+            sub_id = 0
+            previous_sentence_id = sentence_id
+        if int(row.get("sub_id") or 0) > 0:
+            sub_id += 1
+            row["sub_id"] = sub_id
+    return rows, merge_counts
+
+
+def merge_short_chinese_cues(
+    tokens: list[dict[str, Any]], segments: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, int]]]:
+    """Absorb a short, sentence-ending Pass 2 cue into its preceding whole cue."""
+    rows = sorted(
+        (dict(segment) for segment in segments),
+        key=lambda segment: int(segment["start_token_id"]),
+    )
+    kinds = classify_token_kinds(tokens)
+    merges: list[dict[str, int]] = []
+    index = 1
+    while index < len(rows):
+        left, current = rows[index - 1 : index + 1]
+        chinese = str(current["translated_text"])
+        body = display_translated_text(chinese)
+        chinese_chars = [char for char in body if "\u3400" <= char <= "\u9fff"]
+        gap_ms = int(current["start_ms"]) - int(left["end_ms"])
+        if (
+            int(left.get("sub_id") or 0) != 0
+            or int(current.get("sub_id") or 0) != 0
+            or not 1 <= len(chinese_chars) <= SHORT_CHINESE_CUE_CHARS
+            or any(char.isalnum() and not "\u3400" <= char <= "\u9fff" for char in body)
+            or not CHINESE_SENTENCE_END_RE.search(chinese)
+            or int(left["end_token_id"]) + 1 != int(current["start_token_id"])
+            or not 0 <= gap_ms < LONG_PAUSE_MS
+            or (
+                left.get("part_id") is not None
+                and current.get("part_id") is not None
+                and left["part_id"] != current["part_id"]
+            )
+        ):
+            index += 1
+            continue
+        combined = normalize_translated_text(f"{left['translated_text']}{chinese}")
+        if target_units(combined) > RULES.max_target_units:
+            index += 1
+            continue
+
+        start = int(left["start_token_id"])
+        end = int(current["end_token_id"])
+        rows[index - 1 : index + 1] = [{
+            **left,
+            "end_ms": current["end_ms"],
+            "end_token_id": end,
+            "source_text": visible_source_text(tokens, start, end, kinds),
+            "translated_text": combined,
+            "quality_flags": list(dict.fromkeys(
+                [*(left.get("quality_flags") or []), *(current.get("quality_flags") or [])]
+            )),
+        }]
+        merges.append({
+            "kept_source_sentence_id": int(left["source_sentence_id"]),
+            "absorbed_source_sentence_id": int(current["source_sentence_id"]),
+            "start_token_id": start,
+            "end_token_id": end,
+        })
+        index = max(1, index - 1)
+    return rows, merges
 
 
 def _partition_sentence_boundary_result(

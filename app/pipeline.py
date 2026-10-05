@@ -19,6 +19,7 @@ from app.services.subtitle_planner import (
     generate_global_translation_context,
     generate_punctuation_annotations,
     generate_reference_translation,
+    merge_short_chinese_cues,
     split_long_sentences,
 )
 from app.services.subtitle_quality import (
@@ -28,6 +29,7 @@ from app.services.subtitle_quality import (
     target_units,
 )
 from app.services.transcriber import transcribe_tokens
+from app.services.translation_audit import record_event
 
 logger = logging.getLogger(__name__)
 
@@ -256,10 +258,16 @@ class Pipeline:
                     for item in selected_parents
                     if int(item["source_sentence_id"]) not in split_ids
                 ] + split_segments
-            final_segments = sorted(
-                stamp_cue_review_flags(selected_final),
-                key=lambda item: int(item["start_token_id"]),
+            final_segments, short_chinese_merges = merge_short_chinese_cues(
+                tokens, selected_final
             )
+            if short_chinese_merges:
+                record_event(
+                    run_dir / f"part-{int(part['sequence']) + 1:02d}" / "pass3",
+                    "short-chinese-cues-merged",
+                    merges=short_chinese_merges,
+                )
+            final_segments = stamp_cue_review_flags(final_segments)
             _validate_range_coverage(
                 final_segments, int(part["start_token_id"]), int(part["end_token_id"])
             )
@@ -792,6 +800,16 @@ class Pipeline:
                 if int(segment["source_sentence_id"]) not in replaced_ids
             ] + split_segments
             final_segments.sort(key=lambda item: int(item["start_token_id"]))
+        final_segments, short_chinese_merges = merge_short_chinese_cues(tokens, final_segments)
+        if short_chinese_merges:
+            record_event(
+                self.project_dir(project_id)
+                / "artifacts"
+                / "translation-audit"
+                / f"part-{part['id']}-pass3",
+                "short-chinese-cues-merged",
+                merges=short_chinese_merges,
+            )
         _validate_range_coverage(
             final_segments, int(part["start_token_id"]), int(part["end_token_id"])
         )

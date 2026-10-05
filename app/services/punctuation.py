@@ -8,7 +8,7 @@ from app.services.source_sentences import classify_token_kinds
 
 PUNCTUATION_MARKS = frozenset({",", ".", "?", "!", ":", ";"})
 SENTENCE_END_MARKS = frozenset({".", "?", "!"})
-PROMPT_VERSION = "punctuation-v1"
+PROMPT_VERSION = "punctuation-v2"
 
 
 def source_fingerprint(tokens: list[dict[str, Any]]) -> str:

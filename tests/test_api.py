@@ -4,7 +4,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 import app.main as main_module
-from app.db import init_db
+from app.db import connect, init_db
 from app.repository import Repository
 
 
@@ -165,6 +165,105 @@ def test_project_display_name_can_be_changed_without_replacing_video_title(
     assert reset.status_code == 200
     assert reset.json()["display_name"] is None
     assert reset.json()["effective_name"] == "Original YouTube title"
+
+
+def test_delete_project_removes_database_and_both_file_trees(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "api.db"
+    init_db(database)
+    repository = Repository(database)
+    monkeypatch.setattr(main_module, "repository", repository)
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        replace(main_module.settings, data_dir=tmp_path / "data", output_dir=tmp_path / "output"),
+    )
+    project = repository.create_project("https://youtu.be/example")
+    other = repository.create_project("https://youtu.be/other")
+    job = repository.enqueue_job(project["id"], "prepare")
+    repository.claim_next_job()
+    repository.complete_job(job["id"])
+    repository.update_project(project["id"], status="waiting_review", stage="waiting_review")
+    repository.replace_timed_tokens(
+        project["id"], [{"text": "Hello", "start_ms": 0, "end_ms": 1000}]
+    )
+    repository.initialize_subtitle_plan(
+        project["id"],
+        [{"start_token_id": 0, "end_token_id": 0, "start_ms": 0, "end_ms": 1000}],
+    )
+    part_id = repository.list_subtitle_parts(project["id"])[0]["id"]
+    repository.replace_source_sentences(
+        project["id"],
+        part_id,
+        [{
+            "source_sentence_id": 1,
+            "start_token_id": 0,
+            "end_token_id": 0,
+            "start_ms": 0,
+            "end_ms": 1000,
+            "source_sentence": "Hello",
+        }],
+    )
+    repository.begin_part_punctuation(project["id"], part_id, "fingerprint", "codex")
+    repository.replace_segments(
+        project["id"],
+        [{"start_ms": 0, "end_ms": 1000, "source_text": "Hello"}],
+    )
+    source = tmp_path / "data" / "projects" / project["id"] / "source"
+    source.mkdir(parents=True)
+    (source / "video.mp4").write_bytes(b"video")
+    output = tmp_path / "output" / project["id"]
+    output.mkdir(parents=True)
+    (output / "final-v001.mp4").write_bytes(b"render")
+    (output / "english-v001.srt").write_text("subtitle")
+    other_output = tmp_path / "output" / other["id"]
+    other_output.mkdir()
+    (other_output / "keep.txt").write_text("keep")
+
+    client = TestClient(main_module.app)
+    response = client.delete(f"/api/projects/{project['id']}")
+
+    assert response.status_code == 200
+    assert repository.get_project(project["id"]) is None
+    assert repository.list_segments(project["id"]) == []
+    assert not source.parent.exists()
+    assert not output.exists()
+    assert (other_output / "keep.txt").read_text() == "keep"
+    assert client.delete(f"/api/projects/{project['id']}").status_code == 404
+    with connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM projects WHERE id = ?", (project["id"],)
+        ).fetchone()[0] == 0
+        for table in (
+            "jobs", "timed_tokens", "subtitle_parts", "source_sentences",
+            "part_punctuation", "segments",
+        ):
+            assert connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE project_id = ?", (project["id"],)
+            ).fetchone()[0] == 0
+
+
+def test_delete_project_rejects_queued_and_running_jobs(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "api.db"
+    init_db(database)
+    repository = Repository(database)
+    monkeypatch.setattr(main_module, "repository", repository)
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        replace(main_module.settings, data_dir=tmp_path / "data", output_dir=tmp_path / "output"),
+    )
+    project = repository.create_project("https://youtu.be/example")
+    project_files = tmp_path / "data" / "projects" / project["id"]
+    project_files.mkdir(parents=True)
+    (project_files / "keep.txt").write_text("keep")
+    repository.enqueue_job(project["id"], "prepare")
+    client = TestClient(main_module.app)
+
+    assert client.delete(f"/api/projects/{project['id']}").status_code == 409
+    repository.claim_next_job()
+    assert client.delete(f"/api/projects/{project['id']}").status_code == 409
+    assert repository.get_project(project["id"]) is not None
+    assert (project_files / "keep.txt").read_text() == "keep"
 
 
 def test_project_subtitle_style_can_be_saved(tmp_path: Path, monkeypatch) -> None:
@@ -415,7 +514,7 @@ def test_selected_part_rebuild_keeps_pass0_and_visible_cues(
     assert rebuilt["global_translation_context"] == context
     assert rebuilt["global_context_approved"] is True
     assert rebuilt["pending_rebuild_scope"]["parts"][0]["part_id"] == part["id"]
-    assert repository.list_segments(project["id"])[0]["translated_text"] == "你好"
+    assert repository.list_segments(project["id"])[0]["translated_text"] == "你好。"
 
 
 def test_review_issues_are_live_cue_problems_without_severity(

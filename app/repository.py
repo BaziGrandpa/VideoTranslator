@@ -884,13 +884,20 @@ class Repository:
             ).fetchone()
             if following is None:
                 raise ValueError("This is already the final subtitle")
+            merged_end_token_id = (
+                following["end_token_id"]
+                if following["end_token_id"] is not None
+                else current["end_token_id"]
+            )
             connection.execute(
                 """
-                UPDATE segments SET end_ms = ?, source_text = ?, translated_text = ?,
+                UPDATE segments SET end_ms = ?, end_token_id = ?,
+                    source_text = ?, translated_text = ?,
                     status = 'edited', updated_at = ? WHERE id = ?
                 """,
                 (
                     following["end_ms"],
+                    merged_end_token_id,
                     normalize_segment_texts(
                         f"{current['source_text']} {following['source_text']}",
                         f"{current['translated_text']}{following['translated_text']}",

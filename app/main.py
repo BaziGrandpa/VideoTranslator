@@ -5,6 +5,7 @@ import json
 import logging
 import mimetypes
 import os
+import shutil
 import subprocess
 import uuid
 from contextlib import asynccontextmanager
@@ -18,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.config import command_available, settings
-from app.db import init_db
+from app.db import init_db, transaction
 from app.repository import Repository
 from app.services.codex_models import list_codex_models
 from app.services.exact_preview import (
@@ -419,6 +420,54 @@ def rename_project(project_id: str, payload: ProjectRename) -> dict:
         "display_name": display_name,
         "effective_name": display_name or project.get("title") or "Waiting for video metadata",
     }
+
+
+def _project_storage_path(root: Path, project_id: str) -> Path:
+    try:
+        if str(uuid.UUID(project_id)) != project_id:
+            raise ValueError("Project ID must be canonical")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid project ID") from exc
+    resolved_root = root.resolve()
+    path = resolved_root / project_id
+    if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+        raise HTTPException(status_code=409, detail="Project storage path is a link")
+    resolved_path = path.resolve()
+    if resolved_path.parent != resolved_root:
+        raise HTTPException(status_code=400, detail="Invalid project storage path")
+    return resolved_path
+
+
+@app.delete("/api/projects/{project_id}")
+def delete_project(project_id: str) -> dict:
+    project_data = _project_storage_path(settings.data_dir / "projects", project_id)
+    project_output = _project_storage_path(settings.output_dir, project_id)
+    with transaction(repository.database_path) as connection:
+        project = connection.execute(
+            "SELECT status FROM projects WHERE id = ?", (project_id,)
+        ).fetchone()
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        active_job = connection.execute(
+            "SELECT 1 FROM jobs WHERE project_id = ? AND status IN ('queued', 'running') LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        if active_job or project["status"] in {"queued", "running"}:
+            raise HTTPException(
+                status_code=409, detail="Wait for project processing to finish before deleting"
+            )
+        for path in (project_data, project_output):
+            if path.exists():
+                if not path.is_dir():
+                    raise HTTPException(status_code=409, detail="Project storage path is not a folder")
+                try:
+                    shutil.rmtree(path)
+                except OSError as exc:
+                    raise HTTPException(
+                        status_code=500, detail=f"Could not remove project files: {exc}"
+                    ) from exc
+        connection.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    return {"ok": True}
 
 
 @app.patch("/api/projects/{project_id}/translation-provider")

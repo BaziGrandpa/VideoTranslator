@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Video Translator</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2216%22 fill=%22%2338d39f%22/><text x=%2232%22 y=%2241%22 text-anchor=%22middle%22 font-size=%2228%22 font-family=%22Arial%22 font-weight=%22700%22 fill=%22%2306251b%22>VT</text></svg>" />
-    <link rel="stylesheet" href="/static/styles.css?v=20260923-part-rebuild" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260926-project-delete" />
   </head>
   <body>
     <div class="app-shell">
@@ -248,6 +248,25 @@
       </form>
     </dialog>
 
+    <dialog id="delete-project-dialog">
+      <form id="delete-project-form" method="dialog">
+        <div class="dialog-head">
+          <div>
+            <span class="eyebrow">DELETE PROJECT</span>
+            <h2>Delete this project?</h2>
+          </div>
+          <button type="button" id="close-delete-dialog" class="icon-button" aria-label="Close">×</button>
+        </div>
+        <p id="delete-project-name" class="delete-project-name"></p>
+        <p class="muted">This permanently removes the project, all database records, downloaded files, subtitles, artifacts, and every file in its output folder.</p>
+        <div id="delete-project-error" class="error-box hidden"></div>
+        <div class="dialog-actions">
+          <button type="button" id="cancel-delete-dialog">Cancel</button>
+          <button type="submit" class="danger-button">Delete permanently</button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="rebuild-subtitles-dialog" class="rebuild-dialog">
       <form id="rebuild-subtitles-form" method="dialog">
         <div class="dialog-head">
@@ -288,6 +307,6 @@
     </dialog>
 
     <div id="toast" class="toast hidden"></div>
-    <script src="/static/app.js?v=20260923-part-rebuild" defer></script>
+    <script src="/static/app.js?v=20260926-project-delete" defer></script>
   </body>
 </html>

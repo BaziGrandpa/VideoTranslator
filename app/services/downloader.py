@@ -10,9 +10,25 @@ from app.config import settings
 MEDIA_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".m4v"}
 
 
-def _english_language_keys(info: dict[str, Any], kind: str) -> list[str]:
-    values = info.get(kind) or {}
-    return [key for key in values if key.lower() == "en" or key.lower().startswith("en-")]
+def _english_caption(info: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Choose one original English track, never an auto-translated track."""
+    manual = info.get("subtitles") or {}
+    for key in ("en", "en-US", "en-GB"):
+        if key in manual:
+            return key, "youtube_manual"
+    for key in manual:
+        if key.lower().startswith("en-"):
+            return key, "youtube_manual"
+
+    automatic = info.get("automatic_captions") or {}
+    if "en-orig" in automatic:
+        return "en-orig", "youtube_auto"
+    language = str(info.get("language") or "").lower()
+    if language == "en" or language.startswith("en-"):
+        for key in (info.get("language"), "en"):
+            if key in automatic:
+                return key, "youtube_auto"
+    return None, None
 
 
 def download_youtube(
@@ -42,9 +58,8 @@ def download_youtube(
         "outtmpl": str(source_dir / "video.%(ext)s"),
         "format": f"bv*[height<=?{max_height}]+ba/b[height<=?{max_height}]",
         "merge_output_format": "mp4",
-        "writesubtitles": True,
-        "writeautomaticsub": True,
-        "subtitleslangs": ["en", "en.*"],
+        "writesubtitles": False,
+        "writeautomaticsub": False,
         "subtitlesformat": "vtt/best",
         "writeinfojson": False,
         "quiet": True,
@@ -54,7 +69,24 @@ def download_youtube(
         "ffmpeg_location": str(Path(settings.ffmpeg_bin).parent),
     }
     with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(url, download=True)
+        metadata = ydl.extract_info(url, download=False)
+        caption_key, subtitle_source = _english_caption(metadata)
+        if caption_key:
+            ydl.params.update({
+                "writesubtitles": True,
+                "writeautomaticsub": True,
+                "subtitleslangs": [caption_key],
+            })
+        try:
+            info = ydl.extract_info(url, download=True)
+        except yt_dlp.utils.DownloadError as exc:
+            if not caption_key or "Unable to download video subtitles" not in str(exc):
+                raise
+            # The video may still be available when the caption endpoint is blocked.
+            # Download it without captions and let the pipeline use WhisperX.
+            ydl.params.update({"writesubtitles": False, "writeautomaticsub": False})
+            info = ydl.extract_info(url, download=True)
+            caption_key, subtitle_source = None, None
         clean_info = ydl.sanitize_info(info)
 
     (project_dir / "metadata.json").write_text(
@@ -69,15 +101,9 @@ def download_youtube(
         raise RuntimeError("yt-dlp finished without producing a video file")
     video_path = max(media_candidates, key=lambda item: item.stat().st_size)
 
-    subtitle_candidates = sorted(source_dir.glob("video*.vtt"))
-    manual_keys = _english_language_keys(info, "subtitles")
-    automatic_keys = _english_language_keys(info, "automatic_captions")
-    subtitle_path = subtitle_candidates[0] if subtitle_candidates else None
-    if subtitle_path and manual_keys:
-        subtitle_source = "youtube_manual"
-    elif subtitle_path and automatic_keys:
-        subtitle_source = "youtube_auto"
-    else:
+    subtitle_path = source_dir / f"video.{caption_key}.vtt" if caption_key else None
+    if subtitle_path is None or not subtitle_path.is_file():
+        subtitle_path = None
         subtitle_source = None
 
     return {

@@ -114,6 +114,7 @@ def test_pass2_requires_exact_ordered_sentence_id_coverage() -> None:
         },
     )
     assert [item["source_sentence_id"] for item in segments] == [1, 2]
+    assert [item["translated_text"] for item in segments] == ["第一个意思。", "第二个意思。"]
     assert all(item["quality_flags"] == [] for item in segments)
     assert all(item["status"] == "machine_translated" for item in segments)
 

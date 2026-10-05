@@ -22,6 +22,10 @@ A local-first workbench for translating and burning subtitles into YouTube video
 11. Review both languages and adjust subtitle timing in the browser.
 12. Confirm the timeline, then use FFmpeg to add gradient masks and burn styled ASS subtitles.
 
+Pass 2 Chinese punctuation is retained in SQLite and in editable subtitle text. The browser
+preview, exact preview, ASS render, and exported Chinese SRT remove trailing commas and periods
+from displayed cues. Length and reading-speed checks use this displayed text.
+
 The sidebar provider selector supports `Auto: Codex → Grok`, `Codex only`, and `Grok only`.
 The selection is stored per project and is locked while that project is processing. When Codex is
 available in the provider path, its model can be selected from the live catalog returned by the
@@ -166,6 +170,10 @@ and editable subtitle cues. Video files stay in their project directories. Video
 minutes use one Part; longer videos use balanced 20–40 minute Parts centered around 30 minutes.
 A Part is the unit for the Punctuation Pass and each Pass 1, Pass 2, and Pass 3 model call.
 
+Each project in the sidebar has a Delete button beside Rename. Confirming deletion removes its
+database records, downloaded files, artifacts, and versioned files in `output/{project_id}`.
+Projects with queued or running jobs must finish processing before they can be deleted.
+
 `Rebuild subtitles` requires browser confirmation. Full rebuild synchronously deletes the old
 Pass 0 context, timed tokens, Parts, and cues before it queues a new Pass 0–3 run. Skip Pass 0
 keeps the approved translation guidance. The downloaded video, source captions, project settings,
@@ -243,12 +251,20 @@ Python sends only Chinese parents above 24 display units to Pass 3. If Chinese p
 split a parent, Python does that first and Pass 3-1 only fills `end_token_id`. Otherwise Pass 3-2
 splits the Chinese and assigns ends. Prefer 18 display units when already splitting; 24 is the hard
 max. Python infers every start, requires strictly increasing ends and exact parent coverage, then
-stamps length, duration, and reading-speed flags once on the Part's final cues. Pass 3 does not
-perform semantic or terminology auditing.
+merges sub-cues with at most three spoken Tokens into an adjacent sub-cue in the same parent when
+the combined Chinese stays within 24 display units. It stamps length, duration, and reading-speed
+flags once on the Part's final cues. Pass 3 does not perform semantic or terminology auditing.
 
-The review workbench lists cues that are over 24 units, shorter than 700 ms, longer than 5000 ms,
-faster than 12 units/s, or that Pass 3 failed to split. There is no severity and no Apply
-suggestion path.
+Before the final Part cues are stored, Python also merges an unsplit Cue whose Chinese has at most
+three Chinese characters and ends with a period into the preceding unsplit Cue in the same Part,
+provided the token ranges are adjacent, the pause is under 1,200 ms, and the combined displayed
+Chinese does not exceed 24 units. Cues without a final period stay separate under this rule.
+The merged row keeps the preceding source Cue ID; later source Cue IDs do not change, while final
+subtitle `sequence` values remain consecutive.
+
+The review workbench lists cues that are over 24 units, shorter than 700 ms, longer than 5000 ms
+with fewer than 2.5 display units/s, faster than 12 units/s, or that Pass 3 failed to split.
+There is no severity and no Apply suggestion path.
 
 Generation, context, Part-level review requests, parsed provider responses, validation errors and
 final results are recorded under each project's `artifacts/translation-audit/`. Records include

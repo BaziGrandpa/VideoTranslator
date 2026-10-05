@@ -34,6 +34,7 @@ const state = {
     cache: new Map(),
   },
   renamingProjectId: null,
+  deletingProjectId: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -285,7 +286,10 @@ function renderProjectList() {
     <div class="project-item ${state.project?.id === project.id ? "selected" : ""}" data-id="${project.id}">
       <div class="project-item-head">
         <div class="project-item-title">${escapeHtml(projectDisplayName(project))}</div>
-        <button class="rename-project" type="button" aria-label="Rename project">Rename</button>
+        <div class="project-item-actions">
+          <button class="rename-project" type="button" aria-label="Rename project">Rename</button>
+          <button class="delete-project" type="button" aria-label="Delete project" ${["queued", "running"].includes(project.status) ? 'disabled title="Wait for processing to finish"' : ""}>Delete</button>
+        </div>
       </div>
       <div class="project-item-meta">
         <span><i class="status-dot ${project.status}"></i>${escapeHtml(stageNames[project.stage] || project.stage)}</span>
@@ -297,6 +301,10 @@ function renderProjectList() {
     item.querySelector(".rename-project").addEventListener("click", (event) => {
       event.stopPropagation();
       openRenameProjectDialog(item.dataset.id);
+    });
+    item.querySelector(".delete-project").addEventListener("click", (event) => {
+      event.stopPropagation();
+      openDeleteProjectDialog(item.dataset.id);
     });
   });
 }
@@ -1113,7 +1121,10 @@ function updatePreview() {
     preview.classList.add("hidden");
     return;
   }
-  $("#preview-cn").textContent = active.translated_text;
+  $("#preview-cn").textContent = active.translated_text.replace(
+    /[，。,.—–―⸺⸻]+(?=\s*["'”’》」』】）)]*\s*$)/u,
+    "",
+  );
   $("#preview-en").textContent = state.project?.bilingual ? active.source_text : "";
   preview.classList.remove("hidden");
 }
@@ -1868,12 +1879,29 @@ function closeRenameProjectDialog() {
   $("#rename-project-dialog").close();
 }
 
+function openDeleteProjectDialog(projectId) {
+  const project = state.projects.find((item) => item.id === projectId);
+  if (!project) return;
+  state.deletingProjectId = projectId;
+  $("#delete-project-name").textContent = projectDisplayName(project);
+  $("#delete-project-error").classList.add("hidden");
+  $("#delete-project-dialog").showModal();
+}
+
+function closeDeleteProjectDialog() {
+  state.deletingProjectId = null;
+  $("#delete-project-dialog").close();
+}
+
 $("#new-project-button").addEventListener("click", openCreateDialog);
 $("#welcome-new-project").addEventListener("click", openCreateDialog);
 $("#close-dialog").addEventListener("click", () => $("#new-project-dialog").close());
 $("#cancel-dialog").addEventListener("click", () => $("#new-project-dialog").close());
 $("#close-rename-dialog").addEventListener("click", closeRenameProjectDialog);
 $("#cancel-rename-dialog").addEventListener("click", closeRenameProjectDialog);
+$("#close-delete-dialog").addEventListener("click", closeDeleteProjectDialog);
+$("#cancel-delete-dialog").addEventListener("click", closeDeleteProjectDialog);
+$("#delete-project-dialog").addEventListener("close", () => { state.deletingProjectId = null; });
 $("#close-rebuild-dialog").addEventListener("click", () => $("#rebuild-subtitles-dialog").close());
 $("#cancel-rebuild-dialog").addEventListener("click", () => $("#rebuild-subtitles-dialog").close());
 $("#rebuild-subtitles-form").addEventListener("submit", submitRebuildSubtitles);
@@ -2001,6 +2029,64 @@ $("#rename-project-form").addEventListener("submit", async (event) => {
     showToast("Project renamed");
   } catch (error) {
     const box = $("#rename-project-error");
+    box.textContent = error.message;
+    box.classList.remove("hidden");
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+$("#delete-project-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const projectId = state.deletingProjectId;
+  if (!projectId) return;
+  const submit = event.target.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  const isCurrent = state.project?.id === projectId;
+  try {
+    if (isCurrent) {
+      await Promise.allSettled([
+        ...state.pendingSaves,
+        state.contextSavePromise,
+        state.styleSavePromise,
+      ].filter(Boolean));
+      if (state.exactPreview.open) await discardExactPreview();
+      const video = $("#video");
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    }
+    await api(`/api/projects/${projectId}`, { method: "DELETE" });
+    closeDeleteProjectDialog();
+    if (isCurrent) {
+      state.project = null;
+      state.segments = [];
+      state.reviewIssues = [];
+      state.reviewMode = false;
+      state.selectedId = null;
+      state.activeId = null;
+      state.contextDirty = false;
+      state.styleDirty = false;
+      state.segmentSaveFailed = false;
+      state.unsavedSegmentFields.clear();
+      state.segmentTextSaves.clear();
+      state.independentTimingBoundaries.clear();
+      if (state.localRenderLockProjectId === projectId) state.localRenderLockProjectId = null;
+      $("#subtitle-style-panel").classList.add("hidden");
+      syncPolling();
+    }
+    await loadProjects();
+    if (isCurrent) {
+      if (state.projects.length) await openProject(state.projects[0].id);
+      else {
+        $("#project-view").classList.add("hidden");
+        $("#welcome").classList.remove("hidden");
+      }
+    }
+    showToast("Project and all its files deleted");
+  } catch (error) {
+    if (isCurrent && state.project?.id === projectId) renderProject();
+    const box = $("#delete-project-error");
     box.textContent = error.message;
     box.classList.remove("hidden");
   } finally {

@@ -2,6 +2,7 @@ from app.services.prompts import (
     build_global_context_prompt,
     build_reference_translation_prompt,
     build_sentence_alignment_prompt,
+    build_sentence_boundary_prompt,
     build_sentence_split_prompt,
 )
 from app.services.source_sentences import build_source_sentences, materialize_aligned_sentences
@@ -9,11 +10,13 @@ from app.services.subtitle_planner import (
     GLOBAL_CONTEXT_CHUNK_TERM_LIMIT,
     GLOBAL_CONTEXT_TERM_LIMIT,
     _add_term_occurrence_counts,
+    _merge_short_token_subcues,
     _normalize_global_context,
     _select_consistency_terms,
     _split_chinese_on_punctuation,
     generate_global_translation_context,
     generate_reference_translation,
+    merge_short_chinese_cues,
     split_long_sentences,
 )
 from app.services.subtitle_quality import RULES
@@ -294,6 +297,30 @@ def test_pass3_prompt_contains_parent_source_chinese_and_all_token_ids() -> None
     assert "GLOBAL PROJECT CONTEXT" not in prompt
 
 
+def test_pass3_1_prompt_prioritizes_chinese_and_balances_speech_tokens() -> None:
+    tokens = [
+        {"text": "One", "start_ms": 0, "end_ms": 100},
+        {"text": "two", "start_ms": 100, "end_ms": 200},
+        {"text": "three.", "start_ms": 200, "end_ms": 300},
+    ]
+    parent = {
+        "source_sentence_id": 1,
+        "source_text": "One two three.",
+        "start_token_id": 0,
+        "end_token_id": 2,
+    }
+    prompt = build_sentence_boundary_prompt(
+        tokens, [parent], [parent], {1: ["中文一", "中文二"]}, "zh-CN", "Title"
+    )
+
+    assert "The fixed Chinese sub-cues take priority" in prompt
+    assert "spoken-Token counts roughly in proportion" in prompt
+    assert "avoid assigning only 1–3 spoken Tokens" in prompt
+    assert "English grammatical completeness is not required" in prompt
+    assert "no elapsed-time information is provided here" in prompt
+    assert '"start_ms"' not in prompt
+
+
 def test_pass3_runs_boundary_only_and_free_split_requests(monkeypatch) -> None:
     words = ["First", "idea.", "Second", "idea.", "Third", "idea."]
     starts = [0, 100, 2000, 2100, 4000, 4100]
@@ -404,7 +431,7 @@ def test_pass3_stops_after_one_round_when_all_ids_are_valid(monkeypatch) -> None
     )
 
     assert len(calls) == 1
-    assert segments[0]["translated_text"] == "短句"
+    assert segments[0]["translated_text"] == "短句。"
 
 
 def test_pass3_keeps_free_split_output_over_24_units_for_review(
@@ -462,15 +489,178 @@ def test_python_pass3_split_uses_punctuation_and_merges_short_fragments() -> Non
     assert _split_chinese_on_punctuation(
         "只要你能忘记下周的责任确实存在，取消日程、什么都不用做，真的会让人无比自由"
     ) == [
-        "只要你能忘记下周的责任确实存在",
-        "取消日程、什么都不用做",
+        "只要你能忘记下周的责任确实存在，",
+        "取消日程、什么都不用做，",
         "真的会让人无比自由",
     ]
     assert _split_chinese_on_punctuation("好的，长句") == ["好的，长句"]
     assert _split_chinese_on_punctuation(
         "很长的第一句话。我们输了。太蠢了"
-    ) == ["很长的第一句话", "我们输了。太蠢了"]
+    ) == ["很长的第一句话。", "我们输了。太蠢了"]
     assert _split_chinese_on_punctuation("没有任何标点的长句") is None
+
+
+def test_short_token_tail_merges_with_previous_chinese_subcue() -> None:
+    words = ["and", "that", "has", "been", "built", "upon."]
+    tokens = [
+        {"text": word, "start_ms": index * 100, "end_ms": (index + 1) * 100}
+        for index, word in enumerate(words)
+    ]
+    segments = [
+        {
+            "source_sentence_id": 82, "sub_id": 4,
+            "start_token_id": 0, "end_token_id": 4,
+            "start_ms": 0, "end_ms": 500,
+            "source_text": "and that has been built",
+            "translated_text": "以及围绕它建立的一切", "quality_flags": [],
+        },
+        {
+            "source_sentence_id": 82, "sub_id": 5,
+            "start_token_id": 5, "end_token_id": 5,
+            "start_ms": 500, "end_ms": 600,
+            "source_text": "upon.", "translated_text": "也同样如此", "quality_flags": [],
+        },
+    ]
+
+    merged, counts = _merge_short_token_subcues(tokens, segments)
+
+    assert counts == {82: 1}
+    assert len(merged) == 1
+    assert merged[0]["source_text"] == "and that has been built upon."
+    assert merged[0]["translated_text"] == "以及围绕它建立的一切，也同样如此"
+    assert (merged[0]["start_token_id"], merged[0]["end_token_id"]) == (0, 5)
+    assert (merged[0]["start_ms"], merged[0]["end_ms"]) == (0, 600)
+    assert merged[0]["sub_id"] == 1
+
+
+def test_short_token_subcue_stays_when_both_merges_exceed_24_units() -> None:
+    tokens = [
+        {"text": word, "start_ms": index * 100, "end_ms": (index + 1) * 100}
+        for index, word in enumerate(["one", "two", "three", "four", "five", "six"])
+    ]
+    segments = [
+        {
+            "source_sentence_id": 1, "sub_id": index + 1,
+            "start_token_id": index * 2, "end_token_id": index * 2 + 1,
+            "start_ms": index * 200, "end_ms": (index + 1) * 200,
+            "source_text": "", "translated_text": chinese,
+        }
+        for index, chinese in enumerate(["中" * 21, "中文短句", "中" * 21])
+    ]
+
+    merged, counts = _merge_short_token_subcues(tokens, segments)
+
+    assert counts == {}
+    assert len(merged) == 3
+    assert [item["translated_text"] for item in merged] == [
+        "中" * 21, "中文短句", "中" * 21,
+    ]
+
+
+def test_short_token_subcue_does_not_cross_source_sentence() -> None:
+    tokens = [
+        {"text": word, "start_ms": index * 100, "end_ms": (index + 1) * 100}
+        for index, word in enumerate(["one", "two.", "three", "four."])
+    ]
+    segments = [
+        {
+            "source_sentence_id": index + 1, "sub_id": 1,
+            "start_token_id": index * 2, "end_token_id": index * 2 + 1,
+            "start_ms": index * 200, "end_ms": (index + 1) * 200,
+            "source_text": "", "translated_text": "短句",
+        }
+        for index in range(2)
+    ]
+
+    merged, counts = _merge_short_token_subcues(tokens, segments)
+
+    assert counts == {}
+    assert len(merged) == 2
+
+
+def test_short_chinese_full_cue_merges_backward_and_keeps_source_ids() -> None:
+    words = [
+        "and", "they're", "going", "to", "be", "patronizing", "you,",
+        "kind", "of", "look", "down", "on", "you.",
+        "Next", "thought.",
+    ]
+    tokens = [
+        {"text": word, "start_ms": index * 100, "end_ms": (index + 1) * 100}
+        for index, word in enumerate(words)
+    ]
+    segments = [
+        {
+            "source_sentence_id": 6, "sub_id": 0,
+            "start_token_id": 0, "end_token_id": 6,
+            "start_ms": 0, "end_ms": 700,
+            "source_text": "and they're going to be patronizing you,",
+            "translated_text": "他们可能会用居高临下的态度",
+        },
+        {
+            "source_sentence_id": 7, "sub_id": 0,
+            "start_token_id": 7, "end_token_id": 12,
+            "start_ms": 700, "end_ms": 1300,
+            "source_text": "kind of look down on you.",
+            "translated_text": "看你。",
+        },
+        {
+            "source_sentence_id": 8, "sub_id": 0,
+            "start_token_id": 13, "end_token_id": 14,
+            "start_ms": 1300, "end_ms": 1500,
+            "source_text": "Next thought.", "translated_text": "下一句",
+        },
+    ]
+
+    merged, changes = merge_short_chinese_cues(tokens, segments)
+
+    assert [row["source_sentence_id"] for row in merged] == [6, 8]
+    assert changes == [{
+        "kept_source_sentence_id": 6,
+        "absorbed_source_sentence_id": 7,
+        "start_token_id": 0,
+        "end_token_id": 12,
+    }]
+    assert merged[0]["translated_text"] == "他们可能会用居高临下的态度看你。"
+    assert merged[0]["source_text"] == (
+        "and they're going to be patronizing you, kind of look down on you."
+    )
+    assert (merged[0]["start_ms"], merged[0]["end_ms"]) == (0, 1300)
+    assert (merged[0]["start_token_id"], merged[0]["end_token_id"]) == (0, 12)
+    assert segments[0]["end_token_id"] == 6
+
+
+def test_short_chinese_full_cue_requires_period_and_24_unit_budget() -> None:
+    tokens = [
+        {"text": str(index), "start_ms": index * 100, "end_ms": (index + 1) * 100}
+        for index in range(3)
+    ]
+    base = [
+        {
+            "source_sentence_id": 1, "sub_id": 0,
+            "start_token_id": 0, "end_token_id": 0,
+            "start_ms": 0, "end_ms": 100,
+            "source_text": "0", "translated_text": "中" * 24,
+        },
+        {
+            "source_sentence_id": 2, "sub_id": 0,
+            "start_token_id": 1, "end_token_id": 1,
+            "start_ms": 100, "end_ms": 200,
+            "source_text": "1", "translated_text": "看你。",
+        },
+        {
+            "source_sentence_id": 3, "sub_id": 0,
+            "start_token_id": 2, "end_token_id": 2,
+            "start_ms": 200, "end_ms": 300,
+            "source_text": "2", "translated_text": "后文",
+        },
+    ]
+    assert merge_short_chinese_cues(tokens, base)[1] == []
+    base[0]["translated_text"] = "前文"
+    base[1]["translated_text"] = "看你"
+    assert merge_short_chinese_cues(tokens, base)[1] == []
+    base[1]["translated_text"] = "看你。"
+    base[0]["sub_id"] = 1
+    assert merge_short_chinese_cues(tokens, base)[1] == []
 
 
 def test_pass3_1_uses_proportional_fallback_for_non_monotonic_boundaries(
@@ -521,8 +711,7 @@ def test_pass3_1_uses_proportional_fallback_for_non_monotonic_boundaries(
     )
 
     assert [item["translated_text"] for item in segments] == [
-        "因为过去两天的经历",
-        "咸味食物竟然无法吸引我",
+        "因为过去两天的经历，咸味食物竟然无法吸引我，",
         "这件事实在太疯狂了",
     ]
     assert [item["end_token_id"] for item in segments] == sorted(

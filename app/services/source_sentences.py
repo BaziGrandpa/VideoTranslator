@@ -4,7 +4,11 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
-from app.services.subtitle_text import normalize_source_text, normalize_translated_text
+from app.services.subtitle_text import (
+    display_translated_text,
+    normalize_source_text,
+    normalize_translated_text,
+)
 
 LONG_PAUSE_MS = 1200
 MIN_FRAGMENT_WORDS = 3
@@ -188,7 +192,7 @@ def materialize_aligned_sentences(
             raise TypeError("Pass 2 returned an invalid source_sentence_id")
         if sentence_id in received:
             raise ValueError(f"Pass 2 duplicated source_sentence_id {sentence_id}")
-        if not isinstance(chinese, str) or not normalize_translated_text(chinese):
+        if not isinstance(chinese, str) or not display_translated_text(chinese):
             raise ValueError(f"Pass 2 returned empty Chinese for source_sentence_id {sentence_id}")
         received[sentence_id] = normalize_translated_text(chinese)
     if list(received) != expected_ids:
@@ -261,7 +265,7 @@ def materialize_sentence_splits(
             chinese = sub.get("chinese_sentence")
             if isinstance(end, bool) or not isinstance(end, int) or not next_start <= end <= parent_end:
                 raise ValueError(f"Pass 3 returned an invalid end_token_id for source_sentence_id {sentence_id}")
-            if not isinstance(chinese, str) or not normalize_translated_text(chinese):
+            if not isinstance(chinese, str) or not display_translated_text(chinese):
                 raise ValueError(f"Pass 3 returned empty Chinese for source_sentence_id {sentence_id}")
             if not visible_token_ids(tokens, next_start, end, kinds):
                 raise ValueError(f"Pass 3 created a non-speech-only range {next_start}-{end}")

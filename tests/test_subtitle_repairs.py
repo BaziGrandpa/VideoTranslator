@@ -22,7 +22,7 @@ def test_quality_limits_distinguish_soft_and_absolute_ceiling() -> None:
     assert "source_text_too_long" not in analyze_quality(0, 5000, "x" * 200, "短句")
     assert "target_text_above_normal_limit" not in analyze_quality(0, 5000, "Short", "中" * 19)
     assert "target_text_too_long" in analyze_quality(0, 5000, "Short", "中" * 25)
-    assert target_units("中TikTok，") == 5
+    assert target_units("中TikTok，") == 4
     assert "very_short_duration" not in analyze_quality(0, 500, "Yes.", "好")
     assert "very_short_duration" in analyze_quality(0, 500, "one two three", "可以")
 
@@ -30,6 +30,13 @@ def test_quality_limits_distinguish_soft_and_absolute_ceiling() -> None:
 def test_reading_speed_review_threshold_is_twelve_units_per_second() -> None:
     assert "high_target_reading_speed" not in analyze_quality(0, 1000, "Source", "中" * 12)
     assert "high_target_reading_speed" in analyze_quality(0, 1000, "Source", "中" * 13)
+
+
+def test_long_duration_review_requires_low_text_density() -> None:
+    assert "very_long_duration" not in analyze_quality(0, 5000, "Source", "中" * 4)
+    assert "very_long_duration" in analyze_quality(0, 6000, "Source", "中" * 14)
+    assert "very_long_duration" not in analyze_quality(0, 6000, "Source", "中" * 15)
+    assert "very_long_duration" in analyze_quality(0, 11000, "Source", "中" * 20)
 
 
 def test_stamp_cue_review_flags_runs_after_pass3_and_keeps_invalid_splits() -> None:

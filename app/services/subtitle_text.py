@@ -17,7 +17,7 @@ KNOWN_PARENTHETICAL_RE = re.compile(
 SPEAKER_MARK_RE = re.compile(r"(?:^|\s)>>\s*")
 WHITESPACE_RE = re.compile(r"\s+")
 LEADING_DASH_RE = re.compile(r"^[—–―⸺⸻]+")
-TRAILING_PERIOD_RE = re.compile(r"[，。,.—–―⸺⸻]+(?=\s*[\"'”’》」』】）)]*\s*$)")
+TRAILING_DISPLAY_MARK_RE = re.compile(r"[，。,.—–―⸺⸻]+(?=\s*[\"'”’》」』】）)]*\s*$)")
 LATIN_WORD_SPACE_RE = re.compile(r"(?<=[A-Za-z0-9])\s+(?=[A-Za-z0-9])")
 LATIN_SPACE_SENTINEL = "\ue000"
 
@@ -43,9 +43,13 @@ def normalize_translated_text(value: str) -> str:
         value = WHITESPACE_RE.sub("", value)
         value = value.replace(LATIN_SPACE_SENTINEL, " ")
         value = LEADING_DASH_RE.sub("", value)
-        value = TRAILING_PERIOD_RE.sub("", value)
         return value.strip()
     return WHITESPACE_RE.sub(" ", value).strip()
+
+
+def display_translated_text(value: str) -> str:
+    """Remove trailing marks only when producing visible subtitle text."""
+    return TRAILING_DISPLAY_MARK_RE.sub("", normalize_translated_text(value))
 
 
 def normalize_segment_texts(source_text: str, translated_text: str) -> tuple[str, str]:

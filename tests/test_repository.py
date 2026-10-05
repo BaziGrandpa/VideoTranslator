@@ -73,6 +73,54 @@ def test_segment_edit_split_and_merge(tmp_path: Path) -> None:
     assert merged[0]["end_ms"] == 1000
 
 
+def test_chinese_terminal_punctuation_survives_segment_storage_and_edit(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path)
+    project = repository.create_project("https://youtu.be/example")
+    repository.replace_segments(
+        project["id"],
+        [{
+            "start_ms": 0, "end_ms": 1000,
+            "source_text": "Look at you.", "translated_text": "看你。",
+        }],
+    )
+
+    segment = repository.list_segments(project["id"])[0]
+    assert segment["translated_text"] == "看你。"
+    edited = repository.update_segment(
+        project["id"], segment["id"], translated_text="看你，", status="edited"
+    )
+    assert edited["translated_text"] == "看你，"
+
+
+def test_manual_merge_keeps_first_source_id_and_extends_token_range(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path)
+    project = repository.create_project("https://youtu.be/example")
+    repository.replace_segments(
+        project["id"],
+        [
+            {
+                "start_ms": index * 1000,
+                "end_ms": (index + 1) * 1000,
+                "start_token_id": index * 2,
+                "end_token_id": index * 2 + 1,
+                "source_sentence_id": index + 6,
+                "source_text": f"Cue {index + 6}",
+                "translated_text": chinese,
+            }
+            for index, chinese in enumerate(["前文", "看你。", "后文"])
+        ],
+    )
+
+    first = repository.list_segments(project["id"])[0]
+    repository.merge_with_next(project["id"], first["id"])
+
+    merged = repository.list_segments(project["id"])
+    assert [row["source_sentence_id"] for row in merged] == [6, 8]
+    assert [row["sequence"] for row in merged] == [0, 1]
+    assert (merged[0]["start_token_id"], merged[0]["end_token_id"]) == (0, 3)
+    assert merged[0]["translated_text"] == "前文看你。"
+
+
 def test_persists_timed_tokens_and_segment_token_ranges(tmp_path: Path) -> None:
     repository = make_repository(tmp_path)
     project = repository.create_project("https://youtu.be/example")

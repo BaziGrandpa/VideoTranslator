@@ -43,8 +43,11 @@ button.primary:hover { background: #54e3b3; }
 .project-item-head { display: flex; align-items: center; gap: 7px; }
 .project-item-title { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .project-item-head .project-item-title { flex: 1; min-width: 0; }
-.rename-project { flex: 0 0 auto; padding: 3px 6px; border-radius: 6px; color: var(--muted); background: transparent; font-size: 10px; opacity: 0; }
-.project-item:hover .rename-project, .project-item.selected .rename-project, .rename-project:focus { opacity: 1; }
+.project-item-actions { display: flex; flex: 0 0 auto; gap: 2px; }
+.project-item-actions button { padding: 3px 6px; border-radius: 6px; color: var(--muted); background: transparent; font-size: 10px; opacity: 0; }
+.project-item:hover .project-item-actions button, .project-item.selected .project-item-actions button, .project-item-actions button:focus { opacity: 1; }
+.project-item-actions .delete-project { color: var(--danger); }
+.project-item-actions .delete-project:hover { background: #381b20; border-color: #6a2c35; }
 .project-item-meta { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 11px; margin-top: 7px; }
 .status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; background: var(--warning); }
 .status-dot.completed { background: var(--accent); }
@@ -188,6 +191,9 @@ dialog label { display: grid; gap: 8px; color: #bdc4ce; font-size: 13px; margin-
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
 dialog label.check { display: flex; align-items: center; gap: 8px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 24px; }
+.delete-project-name { overflow-wrap: anywhere; font-weight: 750; }
+button.danger-button { color: #fff; background: #a9323d; border-color: #c94451; font-weight: 750; }
+button.danger-button:hover { background: #c23d49; border-color: #e25865; }
 .rebuild-dialog { width: min(780px, 94vw); }
 .rebuild-mode-option { display: grid; grid-template-columns: auto 1fr; align-items: start; gap: 11px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: #101419; }
 .rebuild-mode-option input { margin-top: 3px; }

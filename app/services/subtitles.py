@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from app.services.subtitle_text import normalize_source_text, normalize_translated_text
+from app.services.subtitle_text import display_translated_text, normalize_source_text
 
 TIMESTAMP_RE = re.compile(
     r"(?P<start>\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3})\s+-->\s+"
@@ -116,7 +116,7 @@ def validate_segments(segments: list[dict[str, Any]]) -> list[str]:
             problems.append(f"Subtitle {index} must end after it starts")
         if not str(segment.get("source_text", "")).strip():
             problems.append(f"Subtitle {index} has empty source text")
-        if not str(segment.get("translated_text", "")).strip():
+        if not display_translated_text(str(segment.get("translated_text", ""))):
             problems.append(f"Subtitle {index} has an empty translation")
         if previous and start_ms < int(previous["end_ms"]):
             problems.append(f"Subtitles {index - 1} and {index} overlap")
@@ -129,7 +129,7 @@ def write_srt(path: Path, segments: list[dict[str, Any]], field: str) -> None:
     for index, segment in enumerate(segments, start=1):
         raw_text = str(segment.get(field, ""))
         text = (
-            normalize_translated_text(raw_text)
+            display_translated_text(raw_text)
             if field == "translated_text"
             else normalize_source_text(raw_text)
         )
@@ -197,7 +197,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     for segment in segments:
         start = ms_to_ass(segment["start_ms"])
         end = ms_to_ass(segment["end_ms"])
-        translated = ass_escape(normalize_translated_text(str(segment["translated_text"])))
+        translated = ass_escape(display_translated_text(str(segment["translated_text"])))
         events.append(f"Dialogue: 1,{start},{end},Chinese,,0,0,0,,{translated}")
         if bilingual:
             source = ass_escape(normalize_source_text(str(segment["source_text"])))
