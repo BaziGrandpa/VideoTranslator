@@ -175,7 +175,7 @@ def render_project(
         tail = "\n".join(stderr.splitlines()[-20:])
         raise RuntimeError(f"FFmpeg rendering failed:\n{tail}")
     write_srt(output_dir / f"english-{version_suffix}.srt", segments, "source_text")
-    write_srt(output_dir / f"chinese-{version_suffix}.srt", segments, "translated_text")
+    write_srt(output_dir / f"chinese-{version_suffix}.srt", segments, "target_text")
     temporary_output_path.replace(output_path)
     if progress_callback:
         progress_callback(100)

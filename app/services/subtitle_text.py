@@ -33,7 +33,7 @@ def normalize_source_text(value: str) -> str:
     return WHITESPACE_RE.sub(" ", value).strip()
 
 
-def normalize_translated_text(value: str) -> str:
+def normalize_target_text(value: str) -> str:
     value = remove_stage_directions(str(value))
     if re.search(r"[\u3400-\u9fff]", value):
         # Chinese subtitles do not keep layout whitespace, but spaces inside
@@ -47,10 +47,10 @@ def normalize_translated_text(value: str) -> str:
     return WHITESPACE_RE.sub(" ", value).strip()
 
 
-def display_translated_text(value: str) -> str:
+def display_target_text(value: str) -> str:
     """Remove trailing marks only when producing visible subtitle text."""
-    return TRAILING_DISPLAY_MARK_RE.sub("", normalize_translated_text(value))
+    return TRAILING_DISPLAY_MARK_RE.sub("", normalize_target_text(value))
 
 
-def normalize_segment_texts(source_text: str, translated_text: str) -> tuple[str, str]:
-    return normalize_source_text(source_text), normalize_translated_text(translated_text)
+def normalize_segment_texts(source_text: str, target_text: str) -> tuple[str, str]:
+    return normalize_source_text(source_text), normalize_target_text(target_text)

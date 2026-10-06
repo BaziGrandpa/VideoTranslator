@@ -2,19 +2,19 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
-    "sentences": {
+    "cues": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
-          "source_sentence_id": { "type": "integer" },
-          "chinese_sentence": { "type": "string" }
+          "cue_id": { "type": "integer" },
+          "target_text": { "type": "string" }
         },
-        "required": ["source_sentence_id", "chinese_sentence"],
+        "required": ["cue_id", "target_text"],
         "additionalProperties": false
       }
     }
   },
-  "required": ["sentences"],
+  "required": ["cues"],
   "additionalProperties": false
 }

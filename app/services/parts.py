@@ -7,7 +7,7 @@ TARGET_PART_MS = 30 * 60 * 1000
 MAX_PART_MS = 40 * 60 * 1000
 
 
-def build_subtitle_parts(
+def build_parts(
     tokens: list[dict[str, Any]],
     chapter_starts_ms: list[int] | None = None,
 ) -> list[dict[str, Any]]:

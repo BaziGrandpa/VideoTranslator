@@ -5,9 +5,10 @@ import pytest
 
 import app.pipeline as pipeline_module
 import app.services.subtitle_planner as planner_module
-from app.db import init_db
+from app.db import connect, init_db
 from app.pipeline import Pipeline
 from app.repository import Repository
+from app.services.cues import build_cues
 from app.services.prompts import build_punctuation_prompt
 from app.services.punctuation import (
     apply_punctuation,
@@ -15,13 +16,12 @@ from app.services.punctuation import (
     source_punctuation_count,
     validate_punctuation_annotations,
 )
-from app.services.source_sentences import build_source_sentences
 
 
 def _tokens(count: int, *, punctuation: bool = False, interval_ms: int = 500) -> list[dict]:
     return [
         {
-            "sequence": index,
+            "token_id": index,
             "text": f"word{index}{'.' if punctuation and index == 4 else ''}",
             "start_ms": index * interval_ms,
             "end_ms": (index + 1) * interval_ms,
@@ -50,7 +50,7 @@ def test_hand_annotated_english_splits_cues_without_changing_word_times() -> Non
     ]
     original = [
         {
-            "sequence": index,
+            "token_id": index,
             "text": word,
             "raw_text": word,
             "normalized_text": word,
@@ -65,8 +65,8 @@ def test_hand_annotated_english_splits_cues_without_changing_word_times() -> Non
     ]}
     marks = validate_punctuation_annotations(original, response)
     effective = apply_punctuation(original, marks)
-    cues = build_source_sentences(effective)
-    assert [cue["source_sentence"] for cue in cues] == [
+    cues = build_cues(effective)
+    assert [cue["source_text"] for cue in cues] == [
         "why do we all need constant stimulation all day forever?",
         "we scroll while we watch tv.",
     ]
@@ -84,13 +84,13 @@ def test_two_unpunctuated_parts_run_once_each_before_pass0(
     repository = Repository(database)
     project = repository.create_project("https://youtu.be/example")
     repository.update_project(project["id"], title="Test video")
-    repository.replace_timed_tokens(project["id"], _tokens(100, interval_ms=30_000))
-    before = repository.list_timed_tokens(project["id"])
+    repository.replace_tokens(project["id"], _tokens(100, interval_ms=30_000))
+    before = repository.list_tokens(project["id"])
     calls: list[tuple[int, int, list[int]]] = []
 
     def fake_punctuation(tokens, _title, part_number, part_count, *_args):
-        calls.append((part_number, part_count, [token["sequence"] for token in tokens]))
-        return [{"after_token_id": tokens[4]["sequence"], "mark": "."}]
+        calls.append((part_number, part_count, [token["token_id"] for token in tokens]))
+        return [{"after_token_id": tokens[4]["token_id"], "mark": "."}]
 
     def fake_context(tokens, *_args, **_kwargs):
         assert len(calls) == 2
@@ -98,7 +98,7 @@ def test_two_unpunctuated_parts_run_once_each_before_pass0(
         return ({"overview": "Overview", "style": "Natural", "terms": []}, "codex")
 
     monkeypatch.setattr(pipeline_module, "generate_punctuation_annotations", fake_punctuation)
-    monkeypatch.setattr(pipeline_module, "generate_global_translation_context", fake_context)
+    monkeypatch.setattr(pipeline_module, "generate_translation_context", fake_context)
     monkeypatch.setattr(pipeline_module, "settings", replace(pipeline_module.settings, data_dir=tmp_path))
     pipeline = Pipeline(repository)
     pipeline.translate(project["id"])
@@ -108,7 +108,7 @@ def test_two_unpunctuated_parts_run_once_each_before_pass0(
     assert calls[1][0:2] == (2, 2)
     assert calls[0][2][-1] + 1 == calls[1][2][0]
     assert repository.get_project(project["id"])["status"] == "waiting_context_review"
-    after = repository.list_timed_tokens(project["id"])
+    after = repository.list_tokens(project["id"])
     assert [(t["raw_text"], t["normalized_text"], t["start_ms"], t["end_ms"]) for t in after] == [
         (t["raw_text"], t["normalized_text"], t["start_ms"], t["end_ms"]) for t in before
     ]
@@ -124,7 +124,7 @@ def test_existing_punctuation_skips_model_before_pass0(
     init_db(database)
     repository = Repository(database)
     project = repository.create_project("https://youtu.be/example")
-    repository.replace_timed_tokens(project["id"], _tokens(10, punctuation=True))
+    repository.replace_tokens(project["id"], _tokens(10, punctuation=True))
     monkeypatch.setattr(
         pipeline_module,
         "generate_punctuation_annotations",
@@ -132,12 +132,12 @@ def test_existing_punctuation_skips_model_before_pass0(
     )
     monkeypatch.setattr(
         pipeline_module,
-        "generate_global_translation_context",
+        "generate_translation_context",
         lambda *_args, **_kwargs: ({"overview": "Overview", "style": "Natural", "terms": []}, "codex"),
     )
     monkeypatch.setattr(pipeline_module, "settings", replace(pipeline_module.settings, data_dir=tmp_path))
     Pipeline(repository).translate(project["id"])
-    assert source_punctuation_count(repository.list_timed_tokens(project["id"])) == 1
+    assert source_punctuation_count(repository.list_tokens(project["id"])) == 1
 
 
 def test_full_rebuild_enables_new_stage_and_clears_old_annotations(tmp_path: Path) -> None:
@@ -145,14 +145,14 @@ def test_full_rebuild_enables_new_stage_and_clears_old_annotations(tmp_path: Pat
     init_db(database)
     repository = Repository(database)
     project = repository.create_project("https://youtu.be/example")
-    repository.replace_timed_tokens(project["id"], _tokens(8))
+    repository.replace_tokens(project["id"], _tokens(8))
     repository.initialize_subtitle_plan(project["id"], [{
         "start_token_id": 0, "end_token_id": 7, "start_ms": 0, "end_ms": 4000,
     }])
-    part = repository.list_subtitle_parts(project["id"])[0]
+    part = repository.list_parts(project["id"])[0]
     repository.begin_part_punctuation(
         project["id"], part["id"],
-        source_fingerprint(repository.list_timed_tokens(project["id"])), "codex",
+        source_fingerprint(repository.list_tokens(project["id"])), "codex",
     )
     repository.complete_part_punctuation(part["id"], [{"after_token_id": 4, "mark": "."}])
     repository.update_project(project["id"], punctuation_enabled=0)
@@ -160,8 +160,8 @@ def test_full_rebuild_enables_new_stage_and_clears_old_annotations(tmp_path: Pat
     repository.clear_subtitle_data(project["id"])
 
     assert repository.get_project(project["id"])["punctuation_enabled"] is True
-    assert repository.list_subtitle_parts(project["id"]) == []
-    assert repository.list_timed_tokens(project["id"]) == []
+    assert repository.list_parts(project["id"]) == []
+    assert repository.list_tokens(project["id"]) == []
     assert repository.get_part_punctuation(part["id"]) is None
 
 
@@ -172,7 +172,7 @@ def test_invalid_model_response_has_explicit_error_and_no_second_call(
     init_db(database)
     repository = Repository(database)
     project = repository.create_project("https://youtu.be/example")
-    repository.replace_timed_tokens(project["id"], _tokens(8))
+    repository.replace_tokens(project["id"], _tokens(8))
     attempts = 0
 
     def fake_call(*_args, **_kwargs):
@@ -191,11 +191,14 @@ def test_invalid_model_response_has_explicit_error_and_no_second_call(
     assert "request 1/1" in str(exc.value)
     assert "Pass 0 not started" in str(exc.value)
     assert attempts == 1
-    part = repository.list_subtitle_parts(project["id"])[0]
+    part = repository.list_parts(project["id"])[0]
     saved = repository.get_part_punctuation(part["id"])
     assert saved["status"] == "failed"
-    assert saved["marks_json"] is None
-    assert all(token["text"] == token["normalized_text"] for token in repository.list_timed_tokens(project["id"]))
+    with connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM punctuation_marks WHERE part_id = ?", (part["id"],)
+        ).fetchone()[0] == 0
+    assert all(token["text"] == token["normalized_text"] for token in repository.list_tokens(project["id"]))
     with pytest.raises(RuntimeError, match="no automatic second call"):
         pipeline.translate(project["id"])
     assert attempts == 1

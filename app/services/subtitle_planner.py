@@ -8,30 +8,30 @@ from pathlib import Path
 from typing import Any
 
 from app.config import command_available, settings
-from app.services.prompts import (
-    build_global_context_consolidation_prompt,
-    build_global_context_prompt,
-    build_punctuation_prompt,
-    build_reference_translation_prompt,
-    build_sentence_alignment_prompt,
-    build_sentence_boundary_prompt,
-    build_sentence_split_prompt,
-)
-from app.services.punctuation import PROMPT_VERSION as PUNCTUATION_PROMPT_VERSION
-from app.services.punctuation import validate_punctuation_annotations
-from app.services.source_sentences import (
+from app.services.cues import (
     LONG_PAUSE_MS,
     classify_token_kinds,
-    materialize_aligned_sentences,
-    materialize_sentence_splits,
+    materialize_aligned_cues,
+    materialize_subcues,
     visible_source_text,
     visible_token_ids,
 )
+from app.services.prompts import (
+    build_cue_alignment_prompt,
+    build_part_translation_prompt,
+    build_punctuation_prompt,
+    build_subcue_boundary_prompt,
+    build_subcue_split_prompt,
+    build_translation_context_consolidation_prompt,
+    build_translation_context_prompt,
+)
+from app.services.punctuation import PROMPT_VERSION as PUNCTUATION_PROMPT_VERSION
+from app.services.punctuation import validate_punctuation_annotations
 from app.services.subtitle_quality import PASS3_INVALID_OUTPUT, RULES, target_units
 from app.services.subtitle_text import (
-    display_translated_text,
+    display_target_text,
     normalize_source_text,
-    normalize_translated_text,
+    normalize_target_text,
 )
 from app.services.translation_audit import call_metadata, record_event
 from app.services.translator import (
@@ -44,17 +44,17 @@ from app.services.translator import (
 )
 
 SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schemas"
-SENTENCE_ALIGNMENT_SCHEMA_PATH = SCHEMA_DIR / "subtitle-sentence-alignments.schema.json"
-SENTENCE_SPLIT_SCHEMA_PATH = SCHEMA_DIR / "subtitle-sentence-splits.schema.json"
-SENTENCE_BOUNDARY_SCHEMA_PATH = SCHEMA_DIR / "subtitle-sentence-boundaries.schema.json"
-GLOBAL_CONTEXT_SCHEMA_PATH = SCHEMA_DIR / "global-translation-context.schema.json"
+CUE_ALIGNMENT_SCHEMA_PATH = SCHEMA_DIR / "subtitle-cue-alignments.schema.json"
+SUBCUE_SPLIT_SCHEMA_PATH = SCHEMA_DIR / "subtitle-cue-splits.schema.json"
+SUBCUE_BOUNDARY_SCHEMA_PATH = SCHEMA_DIR / "subtitle-cue-boundaries.schema.json"
+TRANSLATION_CONTEXT_SCHEMA_PATH = SCHEMA_DIR / "translation-context.schema.json"
 PUNCTUATION_SCHEMA_PATH = SCHEMA_DIR / "subtitle-punctuation.schema.json"
 QUOTA_RE = re.compile(r"quota|usage.?limit|rate.?limit|too many requests", re.IGNORECASE)
 logger = logging.getLogger(__name__)
-GLOBAL_CONTEXT_DIRECT_TOKEN_LIMIT = 12_000
-GLOBAL_CONTEXT_CHUNK_TOKENS = 6_000
-GLOBAL_CONTEXT_TERM_LIMIT = 40
-GLOBAL_CONTEXT_CHUNK_TERM_LIMIT = 60
+TRANSLATION_CONTEXT_DIRECT_TOKEN_LIMIT = 12_000
+TRANSLATION_CONTEXT_CHUNK_TOKENS = 6_000
+TRANSLATION_CONTEXT_TERM_LIMIT = 40
+TRANSLATION_CONTEXT_CHUNK_TERM_LIMIT = 60
 SHORT_SUBCUE_SPEECH_TOKENS = 3
 SHORT_CHINESE_CUE_CHARS = 3
 CHINESE_SENTENCE_END_RE = re.compile(r"[。.][\"'”’》」』】）)]*$")
@@ -106,7 +106,7 @@ def generate_punctuation_annotations(
     return marks
 
 
-def generate_reference_translation(
+def translate_part(
     tokens: list[dict[str, Any]],
     target_language: str,
     title: str,
@@ -115,20 +115,20 @@ def generate_reference_translation(
     providers: tuple[str, ...] | None = None,
     codex_model: str | None = None,
     audit_dir: Path | None = None,
-    global_context: dict[str, Any] | None = None,
+    translation_context: dict[str, Any] | None = None,
 ) -> tuple[dict[str, str], str]:
     source_text = normalize_source_text(" ".join(str(token["text"]) for token in tokens))
     if not source_text:
         raise RuntimeError("The part has no source text to translate")
-    prompt = build_reference_translation_prompt(
-        source_text, target_language, title, part_number, part_count, global_context
+    prompt = build_part_translation_prompt(
+        source_text, target_language, title, part_number, part_count, translation_context
     )
     raw, provider = _call_text(
         prompt,
         providers,
         codex_model,
         audit_dir,
-        stage="reference-translation",
+        stage="part-translation",
         part=[part_number, part_count],
     )
     translation = _clean_plain_translation(raw)
@@ -140,12 +140,12 @@ def generate_reference_translation(
         source_text=source_text,
         translation=translation,
         **call_metadata(provider, codex_model),
-        stage="reference-translation",
+        stage="part-translation",
         part=[part_number, part_count],
     )
     return {
         "source_text": source_text,
-        "reference_translation": translation,
+        "target_text": translation,
     }, provider
 
 
@@ -284,7 +284,7 @@ def _audited_call(
     return result
 
 
-def generate_global_translation_context(
+def generate_translation_context(
     tokens: list[dict[str, Any]],
     target_language: str,
     title: str,
@@ -296,47 +296,47 @@ def generate_global_translation_context(
     if not tokens:
         raise RuntimeError("Cannot build global translation context without source tokens")
 
-    if len(tokens) <= GLOBAL_CONTEXT_DIRECT_TOKEN_LIMIT:
+    if len(tokens) <= TRANSLATION_CONTEXT_DIRECT_TOKEN_LIMIT:
         transcript = normalize_source_text(" ".join(str(token["text"]) for token in tokens))
-        prompt = build_global_context_prompt(
+        prompt = build_translation_context_prompt(
             transcript,
             target_language,
             title,
             chunk_label=None,
-            term_limit=GLOBAL_CONTEXT_TERM_LIMIT,
-            chunk_term_limit=GLOBAL_CONTEXT_CHUNK_TERM_LIMIT,
+            term_limit=TRANSLATION_CONTEXT_TERM_LIMIT,
+            chunk_term_limit=TRANSLATION_CONTEXT_CHUNK_TERM_LIMIT,
         )
         result, provider = _call_providers(
             prompt,
-            GLOBAL_CONTEXT_SCHEMA_PATH,
+            TRANSLATION_CONTEXT_SCHEMA_PATH,
             providers,
             codex_model,
             audit_dir,
             stage="context",
         )
-        context = _normalize_global_context(result, term_limit=GLOBAL_CONTEXT_CHUNK_TERM_LIMIT)
+        context = _normalize_translation_context(result, term_limit=TRANSLATION_CONTEXT_CHUNK_TERM_LIMIT)
         counted = _add_term_occurrence_counts(context, transcript)
         return _select_consistency_terms(counted), provider
 
     candidates: list[dict[str, Any]] = []
     used_providers: list[str] = []
-    chunk_count = (len(tokens) + GLOBAL_CONTEXT_CHUNK_TOKENS - 1) // GLOBAL_CONTEXT_CHUNK_TOKENS
+    chunk_count = (len(tokens) + TRANSLATION_CONTEXT_CHUNK_TOKENS - 1) // TRANSLATION_CONTEXT_CHUNK_TOKENS
     for chunk_index, start in enumerate(
-        range(0, len(tokens), GLOBAL_CONTEXT_CHUNK_TOKENS), start=1
+        range(0, len(tokens), TRANSLATION_CONTEXT_CHUNK_TOKENS), start=1
     ):
-        chunk = tokens[start : start + GLOBAL_CONTEXT_CHUNK_TOKENS]
+        chunk = tokens[start : start + TRANSLATION_CONTEXT_CHUNK_TOKENS]
         transcript = normalize_source_text(" ".join(str(token["text"]) for token in chunk))
-        prompt = build_global_context_prompt(
+        prompt = build_translation_context_prompt(
             transcript,
             target_language,
             title,
             chunk_label=f"{chunk_index}/{chunk_count}",
-            term_limit=GLOBAL_CONTEXT_TERM_LIMIT,
-            chunk_term_limit=GLOBAL_CONTEXT_CHUNK_TERM_LIMIT,
+            term_limit=TRANSLATION_CONTEXT_TERM_LIMIT,
+            chunk_term_limit=TRANSLATION_CONTEXT_CHUNK_TERM_LIMIT,
         )
         candidate, provider = _call_providers(
             prompt,
-            GLOBAL_CONTEXT_SCHEMA_PATH,
+            TRANSLATION_CONTEXT_SCHEMA_PATH,
             providers,
             codex_model,
             audit_dir / f"chunk-{chunk_index:02d}" if audit_dir else None,
@@ -344,23 +344,23 @@ def generate_global_translation_context(
             chunk=f"{chunk_index}/{chunk_count}",
         )
         candidates.append(
-            _normalize_global_context(candidate, term_limit=GLOBAL_CONTEXT_CHUNK_TERM_LIMIT)
+            _normalize_translation_context(candidate, term_limit=TRANSLATION_CONTEXT_CHUNK_TERM_LIMIT)
         )
         used_providers.append(provider)
 
     full_transcript = normalize_source_text(" ".join(str(token["text"]) for token in tokens))
     candidate_stats = _candidate_term_stats(candidates, full_transcript)
 
-    consolidation_prompt = build_global_context_consolidation_prompt(
+    consolidation_prompt = build_translation_context_consolidation_prompt(
         title,
         target_language,
         candidate_stats,
         candidates,
-        term_limit=GLOBAL_CONTEXT_TERM_LIMIT,
+        term_limit=TRANSLATION_CONTEXT_TERM_LIMIT,
     )
     consolidated, provider = _call_providers(
         consolidation_prompt,
-        GLOBAL_CONTEXT_SCHEMA_PATH,
+        TRANSLATION_CONTEXT_SCHEMA_PATH,
         providers,
         codex_model,
         audit_dir / "consolidation" if audit_dir else None,
@@ -369,20 +369,20 @@ def generate_global_translation_context(
     )
     record_event(
         audit_dir,
-        "global-context-consolidated",
+        "translation-context-consolidated",
         chunk_count=chunk_count,
         chunk_providers=used_providers,
         provider=provider,
     )
-    context = _normalize_global_context(
-        consolidated, term_limit=GLOBAL_CONTEXT_CHUNK_TERM_LIMIT
+    context = _normalize_translation_context(
+        consolidated, term_limit=TRANSLATION_CONTEXT_CHUNK_TERM_LIMIT
     )
     counted = _add_term_occurrence_counts(context, full_transcript)
     return _select_consistency_terms(counted), provider
 
 
-def _normalize_global_context(
-    result: dict[str, Any], *, term_limit: int = GLOBAL_CONTEXT_TERM_LIMIT
+def _normalize_translation_context(
+    result: dict[str, Any], *, term_limit: int = TRANSLATION_CONTEXT_TERM_LIMIT
 ) -> dict[str, Any]:
     if not isinstance(result, dict):
         raise TypeError("Global translation context must be an object")
@@ -460,7 +460,7 @@ def _select_consistency_terms(context: dict[str, Any]) -> dict[str, Any]:
     )
     return {
         **context,
-        "terms": [term for _, term in ranked[:GLOBAL_CONTEXT_TERM_LIMIT]],
+        "terms": [term for _, term in ranked[:TRANSLATION_CONTEXT_TERM_LIMIT]],
     }
 
 
@@ -493,9 +493,9 @@ def _candidate_term_stats(
     )
 
 
-def align_part_sentences(
+def align_part_cues(
     tokens: list[dict[str, Any]],
-    source_sentences: list[dict[str, Any]],
+    cues: list[dict[str, Any]],
     target_language: str,
     title: str,
     part_number: int,
@@ -506,10 +506,10 @@ def align_part_sentences(
     audit_dir: Path | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Pass 2: place Pass 1 Chinese onto every Cue in one Part."""
-    if not source_sentences:
+    if not cues:
         raise RuntimeError("Pass 2 has no cues")
-    prompt = build_sentence_alignment_prompt(
-        source_sentences,
+    prompt = build_cue_alignment_prompt(
+        cues,
         target_language,
         title,
         part_number,
@@ -519,31 +519,31 @@ def align_part_sentences(
     errors: list[str] = []
     quota_errors = 0
     token_range = [
-        int(source_sentences[0]["start_token_id"]),
-        int(source_sentences[-1]["end_token_id"]),
+        int(cues[0]["start_token_id"]),
+        int(cues[-1]["end_token_id"]),
     ]
     for provider in providers or settings.translation_providers:
         try:
             result = _audited_call(
                 provider,
                 prompt,
-                SENTENCE_ALIGNMENT_SCHEMA_PATH,
+                CUE_ALIGNMENT_SCHEMA_PATH,
                 codex_model,
                 audit_dir,
-                stage="part-sentence-alignment",
+                stage="part-cue-alignment",
                 part=[part_number, part_count],
                 token_range=token_range,
             )
-            segments = materialize_aligned_sentences(tokens, source_sentences, result)
+            aligned_cues = materialize_aligned_cues(tokens, cues, result)
             record_event(
                 audit_dir,
-                "part-sentence-alignment-validated",
+                "part-cue-alignment-validated",
                 part=[part_number, part_count],
                 token_range=token_range,
-                source_sentence_count=len(source_sentences),
-                segments=segments,
+                cue_count=len(cues),
+                cues=aligned_cues,
             )
-            return segments, provider
+            return aligned_cues, provider
         except (
             OSError,
             RuntimeError,
@@ -553,7 +553,7 @@ def align_part_sentences(
             json.JSONDecodeError,
         ) as exc:
             errors.append(f"{provider}: {exc}")
-            record_event(audit_dir, "part-sentence-alignment-error", provider=provider, error=str(exc))
+            record_event(audit_dir, "part-cue-alignment-error", provider=provider, error=str(exc))
             if QUOTA_RE.search(str(exc)):
                 quota_errors += 1
     message = "; ".join(errors)
@@ -562,21 +562,22 @@ def align_part_sentences(
     raise RuntimeError("Pass 2 alignment failed for configured providers: " + message)
 
 
-def split_long_sentences(
+def split_long_cues(
     tokens: list[dict[str, Any]],
-    parent_segments: list[dict[str, Any]],
-    all_source_sentences: list[dict[str, Any]],
+    parent_cues: list[dict[str, Any]],
+    all_cues: list[dict[str, Any]],
     target_language: str,
     title: str,
     translation_context: dict[str, Any],
     providers: tuple[str, ...] | None = None,
     codex_model: str | None = None,
     audit_dir: Path | None = None,
-) -> tuple[list[dict[str, Any]], str]:
+    include_subcues: bool = False,
+) -> tuple[list[dict[str, Any]], str] | tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
     """Pass 3: run focused boundary-only and free-splitting requests once each."""
     del translation_context
-    if not parent_segments:
-        raise RuntimeError("Pass 3 has no long source sentences to split")
+    if not parent_cues:
+        raise RuntimeError("Pass 3 has no long Cues to split")
     errors: list[str] = []
     quota_errors = 0
     for provider in providers or settings.translation_providers:
@@ -584,29 +585,30 @@ def split_long_sentences(
             prepared: dict[int, list[str]] = {}
             boundary_parents: list[dict[str, Any]] = []
             free_split_parents: list[dict[str, Any]] = []
-            for parent in parent_segments:
-                pieces = _split_chinese_on_punctuation(str(parent["translated_text"]))
+            for parent in parent_cues:
+                pieces = _split_chinese_on_punctuation(str(parent["target_text"]))
                 if pieces is None:
                     free_split_parents.append(parent)
                     continue
-                sentence_id = int(parent["source_sentence_id"])
-                prepared[sentence_id] = pieces
+                cue_id = int(parent["cue_id"])
+                prepared[cue_id] = pieces
                 boundary_parents.append(parent)
 
             accepted: dict[int, list[dict[str, Any]]] = {}
             invalid: dict[int, str] = {}
+            raw_subcues: list[dict[str, Any]] = []
             if boundary_parents:
                 boundary_result = _audited_call(
                     provider,
-                    build_sentence_boundary_prompt(
+                    build_subcue_boundary_prompt(
                         tokens,
                         boundary_parents,
-                        all_source_sentences,
+                        all_cues,
                         prepared,
                         target_language,
                         title,
                     ),
-                    SENTENCE_BOUNDARY_SCHEMA_PATH,
+                    SUBCUE_BOUNDARY_SCHEMA_PATH,
                     codex_model,
                     audit_dir,
                     stage="pass3-1-boundary-assignment",
@@ -616,60 +618,78 @@ def split_long_sentences(
                     boundary_accepted,
                     boundary_invalid,
                     boundary_fallback_ids,
-                ) = _partition_sentence_boundary_result(
+                ) = _partition_cue_boundary_result(
                     tokens, boundary_parents, prepared, boundary_result
                 )
                 accepted.update(boundary_accepted)
                 invalid.update(boundary_invalid)
+                raw_subcues.extend(
+                    {
+                        **subcue,
+                        "split_pass": "pass3_1",
+                        "boundary_source": (
+                            "proportional_fallback" if cue_id in boundary_fallback_ids else "model"
+                        ),
+                    }
+                    for cue_id, subcues in boundary_accepted.items()
+                    for subcue in subcues
+                )
                 record_event(
                     audit_dir,
                     "pass3-1-boundaries-validated",
-                    source_sentence_count=len(boundary_parents),
-                    accepted_source_sentence_ids=sorted(boundary_accepted),
-                    proportional_fallback_source_sentence_ids=sorted(boundary_fallback_ids),
-                    invalid_source_sentences=boundary_invalid,
+                    cue_count=len(boundary_parents),
+                    accepted_cue_ids=sorted(boundary_accepted),
+                    proportional_fallback_cue_ids=sorted(boundary_fallback_ids),
+                    invalid_cues=boundary_invalid,
                 )
 
             if free_split_parents:
                 split_result = _audited_call(
                     provider,
-                    build_sentence_split_prompt(
+                    build_subcue_split_prompt(
                         tokens,
                         free_split_parents,
-                        all_source_sentences,
+                        all_cues,
                         target_language,
                         title,
                     ),
-                    SENTENCE_SPLIT_SCHEMA_PATH,
+                    SUBCUE_SPLIT_SCHEMA_PATH,
                     codex_model,
                     audit_dir,
                     stage="pass3-2-chinese-splitting",
                     token_range=_parent_token_range(free_split_parents),
                 )
-                split_accepted, split_invalid = _partition_sentence_split_result(
+                split_accepted, split_invalid = _partition_cue_split_result(
                     tokens, free_split_parents, split_result
                 )
                 accepted.update(split_accepted)
                 invalid.update(split_invalid)
+                raw_subcues.extend(
+                    {**subcue, "split_pass": "pass3_2", "boundary_source": "model"}
+                    for subcues in split_accepted.values()
+                    for subcue in subcues
+                )
                 record_event(
                     audit_dir,
                     "pass3-2-splits-validated",
-                    source_sentence_count=len(free_split_parents),
-                    accepted_source_sentence_ids=sorted(split_accepted),
-                    invalid_source_sentences=split_invalid,
+                    cue_count=len(free_split_parents),
+                    accepted_cue_ids=sorted(split_accepted),
+                    invalid_cues=split_invalid,
                 )
 
-            segments = _assemble_sentence_split_results(parent_segments, accepted, invalid)
+            segments = _assemble_cue_split_results(parent_cues, accepted, invalid)
             segments, short_token_merges = _merge_short_token_subcues(tokens, segments)
             record_event(
                 audit_dir,
-                "long-sentence-splits-finalized",
-                token_range=_parent_token_range(parent_segments),
-                source_sentence_count=len(parent_segments),
-                manual_review_source_sentence_ids=sorted(invalid),
+                "long-cue-splits-finalized",
+                token_range=_parent_token_range(parent_cues),
+                cue_count=len(parent_cues),
+                manual_review_cue_ids=sorted(invalid),
                 short_token_subcue_merges=short_token_merges,
                 segments=segments,
             )
+            if include_subcues:
+                return segments, provider, raw_subcues
             return segments, provider
         except (
             OSError,
@@ -680,7 +700,7 @@ def split_long_sentences(
             json.JSONDecodeError,
         ) as exc:
             errors.append(f"{provider}: {exc}")
-            record_event(audit_dir, "long-sentence-split-error", provider=provider, error=str(exc))
+            record_event(audit_dir, "long-cue-split-error", provider=provider, error=str(exc))
             if QUOTA_RE.search(str(exc)):
                 quota_errors += 1
     message = "; ".join(errors)
@@ -689,10 +709,10 @@ def split_long_sentences(
     raise RuntimeError("All local Pass 3 CLIs failed: " + message)
 
 
-def _parent_token_range(parent_segments: list[dict[str, Any]]) -> list[int]:
+def _parent_token_range(parent_cues: list[dict[str, Any]]) -> list[int]:
     return [
-        min(int(item["start_token_id"]) for item in parent_segments),
-        max(int(item["end_token_id"]) for item in parent_segments),
+        min(int(item["start_token_id"]) for item in parent_cues),
+        max(int(item["end_token_id"]) for item in parent_cues),
     ]
 
 
@@ -712,7 +732,7 @@ def _split_chinese_on_punctuation(value: str) -> list[str] | None:
     while changed and len(pieces) > 1:
         changed = False
         for index, piece in enumerate(pieces):
-            cleaned = normalize_translated_text(piece)
+            cleaned = normalize_target_text(piece)
             if target_units(cleaned) >= RULES.short_target_units:
                 continue
             prefer_next = piece.rstrip().endswith(CHINESE_CONTINUATION_PUNCTUATION)
@@ -726,7 +746,7 @@ def _split_chinese_on_punctuation(value: str) -> list[str] | None:
             del pieces[index]
             changed = True
             break
-    return [normalize_translated_text(piece) for piece in pieces]
+    return [normalize_target_text(piece) for piece in pieces]
 
 
 def _merge_short_token_subcues(
@@ -739,7 +759,7 @@ def _merge_short_token_subcues(
     index = 0
     while index < len(rows):
         current = rows[index]
-        if int(current.get("sub_id") or 0) == 0:
+        if int(current.get("subcue_id") or 0) == 0:
             index += 1
             continue
         speech_count = len(visible_token_ids(
@@ -755,18 +775,18 @@ def _merge_short_token_subcues(
                 continue
             other = rows[neighbor]
             if (
-                int(other.get("sub_id") or 0) == 0
-                or other["source_sentence_id"] != current["source_sentence_id"]
+                int(other.get("subcue_id") or 0) == 0
+                or other["cue_id"] != current["cue_id"]
             ):
                 continue
             left_index = min(index, neighbor)
             left, right = rows[left_index : left_index + 2]
-            left_text = str(left["translated_text"])
+            left_text = str(left["target_text"])
             separator = "" if left_text.endswith(
                 ("，", "。", "！", "？", "；", "：", ",", ".", "!", "?", ";", ":")
             ) else "，"
-            chinese = normalize_translated_text(
-                f"{left_text}{separator}{right['translated_text']}"
+            chinese = normalize_target_text(
+                f"{left_text}{separator}{right['target_text']}"
             )
             units = target_units(chinese)
             if units > RULES.max_target_units:
@@ -799,26 +819,26 @@ def _merge_short_token_subcues(
                 "end_ms": right["end_ms"],
                 "end_token_id": end,
                 "source_text": visible_source_text(tokens, start, end, kinds),
-                "translated_text": chinese,
+                "target_text": chinese,
                 "quality_flags": list(dict.fromkeys(
                     [*(left.get("quality_flags") or []), *(right.get("quality_flags") or [])]
                 )),
             }
         ]
-        sentence_id = int(left["source_sentence_id"])
-        merge_counts[sentence_id] = merge_counts.get(sentence_id, 0) + 1
+        cue_id = int(left["cue_id"])
+        merge_counts[cue_id] = merge_counts.get(cue_id, 0) + 1
         index = max(0, left_index - 1)
 
-    previous_sentence_id: int | None = None
-    sub_id = 0
+    previous_cue_id: int | None = None
+    subcue_id = 0
     for row in rows:
-        sentence_id = int(row["source_sentence_id"])
-        if sentence_id != previous_sentence_id:
-            sub_id = 0
-            previous_sentence_id = sentence_id
-        if int(row.get("sub_id") or 0) > 0:
-            sub_id += 1
-            row["sub_id"] = sub_id
+        cue_id = int(row["cue_id"])
+        if cue_id != previous_cue_id:
+            subcue_id = 0
+            previous_cue_id = cue_id
+        if int(row.get("subcue_id") or 0) > 0:
+            subcue_id += 1
+            row["subcue_id"] = subcue_id
     return rows, merge_counts
 
 
@@ -835,13 +855,13 @@ def merge_short_chinese_cues(
     index = 1
     while index < len(rows):
         left, current = rows[index - 1 : index + 1]
-        chinese = str(current["translated_text"])
-        body = display_translated_text(chinese)
+        chinese = str(current["target_text"])
+        body = display_target_text(chinese)
         chinese_chars = [char for char in body if "\u3400" <= char <= "\u9fff"]
         gap_ms = int(current["start_ms"]) - int(left["end_ms"])
         if (
-            int(left.get("sub_id") or 0) != 0
-            or int(current.get("sub_id") or 0) != 0
+            int(left.get("subcue_id") or 0) != 0
+            or int(current.get("subcue_id") or 0) != 0
             or not 1 <= len(chinese_chars) <= SHORT_CHINESE_CUE_CHARS
             or any(char.isalnum() and not "\u3400" <= char <= "\u9fff" for char in body)
             or not CHINESE_SENTENCE_END_RE.search(chinese)
@@ -855,7 +875,7 @@ def merge_short_chinese_cues(
         ):
             index += 1
             continue
-        combined = normalize_translated_text(f"{left['translated_text']}{chinese}")
+        combined = normalize_target_text(f"{left['target_text']}{chinese}")
         if target_units(combined) > RULES.max_target_units:
             index += 1
             continue
@@ -867,14 +887,14 @@ def merge_short_chinese_cues(
             "end_ms": current["end_ms"],
             "end_token_id": end,
             "source_text": visible_source_text(tokens, start, end, kinds),
-            "translated_text": combined,
+            "target_text": combined,
             "quality_flags": list(dict.fromkeys(
                 [*(left.get("quality_flags") or []), *(current.get("quality_flags") or [])]
             )),
         }]
         merges.append({
-            "kept_source_sentence_id": int(left["source_sentence_id"]),
-            "absorbed_source_sentence_id": int(current["source_sentence_id"]),
+            "kept_cue_id": int(left["cue_id"]),
+            "absorbed_cue_id": int(current["cue_id"]),
             "start_token_id": start,
             "end_token_id": end,
         })
@@ -882,116 +902,116 @@ def merge_short_chinese_cues(
     return rows, merges
 
 
-def _partition_sentence_boundary_result(
+def _partition_cue_boundary_result(
     tokens: list[dict[str, Any]],
-    parent_segments: list[dict[str, Any]],
+    parent_cues: list[dict[str, Any]],
     prepared: dict[int, list[str]],
     result: dict[str, Any],
 ) -> tuple[dict[int, list[dict[str, Any]]], dict[int, str], set[int]]:
-    rows = result.get("sentences") if isinstance(result, dict) else None
-    expected = {int(parent["source_sentence_id"]): parent for parent in parent_segments}
+    rows = result.get("cues") if isinstance(result, dict) else None
+    expected = {int(parent["cue_id"]): parent for parent in parent_cues}
     if not isinstance(rows, list):
         rows = []
     rows_by_id: dict[int, list[dict[str, Any]]] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
-        sentence_id = row.get("source_sentence_id")
+        cue_id = row.get("cue_id")
         if (
-            isinstance(sentence_id, int)
-            and not isinstance(sentence_id, bool)
-            and sentence_id in expected
+            isinstance(cue_id, int)
+            and not isinstance(cue_id, bool)
+            and cue_id in expected
         ):
-            rows_by_id.setdefault(sentence_id, []).append(row)
+            rows_by_id.setdefault(cue_id, []).append(row)
 
     accepted: dict[int, list[dict[str, Any]]] = {}
     invalid: dict[int, str] = {}
     fallback_ids: set[int] = set()
-    for sentence_id, parent in expected.items():
-        matches = rows_by_id.get(sentence_id, [])
+    for cue_id, parent in expected.items():
+        matches = rows_by_id.get(cue_id, [])
         error: str | None = None
         standard_subs: list[dict[str, Any]] = []
         if len(matches) != 1:
             error = (
-                "Pass 3-1 omitted this source_sentence_id"
+                "Pass 3-1 omitted this cue_id"
                 if not matches
-                else "Pass 3-1 duplicated this source_sentence_id"
+                else "Pass 3-1 duplicated this cue_id"
             )
-        chinese = prepared[sentence_id]
+        chinese = prepared[cue_id]
         if error is None:
             boundaries = matches[0].get("boundaries")
             if not isinstance(boundaries, list) or len(boundaries) != len(chinese):
-                error = "Pass 3-1 boundary count does not match subsentence count"
+                error = "Pass 3-1 boundary count does not match Sub-cue count"
             else:
-                for expected_sub_id, (boundary, text) in enumerate(
+                for expected_subcue_id, (boundary, text) in enumerate(
                     zip(boundaries, chinese, strict=True), start=1
                 ):
                     if (
                         not isinstance(boundary, dict)
-                        or boundary.get("subsentence_id") != expected_sub_id
+                        or boundary.get("subcue_id") != expected_subcue_id
                     ):
-                        error = "Pass 3-1 returned invalid subsentence_id sequence"
+                        error = "Pass 3-1 returned invalid subcue_id order"
                         standard_subs = []
                         break
                     standard_subs.append(
                         {
                             "end_token_id": boundary.get("end_token_id"),
-                            "chinese_sentence": text,
+                            "target_text": text,
                         }
                     )
         try:
             if error is not None:
                 raise ValueError(error)
-            accepted[sentence_id] = materialize_sentence_splits(
+            accepted[cue_id] = materialize_subcues(
                 tokens,
                 [parent],
                 {
-                    "sentences": [
+                    "cues": [
                         {
-                            "source_sentence_id": sentence_id,
-                            "subsentences": standard_subs,
+                            "cue_id": cue_id,
+                            "subcues": standard_subs,
                         }
                     ]
                 },
             )
         except (TypeError, ValueError, RuntimeError) as exc:
             try:
-                fallback_subs = _proportional_boundary_subsentences(
+                fallback_subs = _proportional_boundary_subcues(
                     tokens, parent, chinese
                 )
-                accepted[sentence_id] = materialize_sentence_splits(
+                accepted[cue_id] = materialize_subcues(
                     tokens,
                     [parent],
                     {
-                        "sentences": [
+                        "cues": [
                             {
-                                "source_sentence_id": sentence_id,
-                                "subsentences": fallback_subs,
+                                "cue_id": cue_id,
+                                "subcues": fallback_subs,
                             }
                         ]
                     },
                 )
-                fallback_ids.add(sentence_id)
+                fallback_ids.add(cue_id)
             except (TypeError, ValueError, RuntimeError) as fallback_exc:
-                invalid[sentence_id] = (
+                invalid[cue_id] = (
                     f"{str(exc).replace('Pass 3', 'Pass 3-1')}; "
                     f"proportional fallback failed: {fallback_exc}"
                 )
     return accepted, invalid, fallback_ids
 
 
-def _proportional_boundary_subsentences(
+def _proportional_boundary_subcues(
     tokens: list[dict[str, Any]],
     parent: dict[str, Any],
     chinese: list[str],
 ) -> list[dict[str, Any]]:
     if not chinese:
-        raise ValueError("Pass 3-1 has no prepared Chinese subsentences")
+        raise ValueError("Pass 3-1 has no prepared Chinese subcues")
     start = int(parent["start_token_id"])
     end = int(parent["end_token_id"])
     speech_ids = visible_token_ids(tokens, start, end, classify_token_kinds(tokens))
     if len(speech_ids) < len(chinese):
-        raise ValueError("Pass 3-1 has fewer speech Tokens than Chinese subsentences")
+        raise ValueError("Pass 3-1 has fewer speech Tokens than Chinese subcues")
 
     weights = [max(target_units(text), 0.5) for text in chinese]
     total_weight = sum(weights)
@@ -1008,64 +1028,64 @@ def _proportional_boundary_subsentences(
             proposed = round(total_speech * cumulative_weight / total_weight)
             assigned = max(assigned + 1, min(proposed, total_speech - remaining_subs))
             boundary = speech_ids[assigned - 1]
-        result.append({"end_token_id": boundary, "chinese_sentence": text})
+        result.append({"end_token_id": boundary, "target_text": text})
     return result
 
 
-def _partition_sentence_split_result(
+def _partition_cue_split_result(
     tokens: list[dict[str, Any]],
-    parent_segments: list[dict[str, Any]],
+    parent_cues: list[dict[str, Any]],
     result: dict[str, Any],
 ) -> tuple[dict[int, list[dict[str, Any]]], dict[int, str]]:
     """Validate each parent independently so one malformed ID does not discard its peers."""
-    parents = {int(parent["source_sentence_id"]): parent for parent in parent_segments}
+    parents = {int(parent["cue_id"]): parent for parent in parent_cues}
     expected_ids = list(parents)
-    rows = result.get("sentences") if isinstance(result, dict) else None
+    rows = result.get("cues") if isinstance(result, dict) else None
     if not isinstance(rows, list):
-        return {}, {sentence_id: "Pass 3 response has no sentences array" for sentence_id in expected_ids}
+        return {}, {cue_id: "Pass 3 response has no cues array" for cue_id in expected_ids}
 
     rows_by_id: dict[int, list[dict[str, Any]]] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
-        sentence_id = row.get("source_sentence_id")
-        if isinstance(sentence_id, bool) or not isinstance(sentence_id, int):
+        cue_id = row.get("cue_id")
+        if isinstance(cue_id, bool) or not isinstance(cue_id, int):
             continue
-        if sentence_id in parents:
-            rows_by_id.setdefault(sentence_id, []).append(row)
+        if cue_id in parents:
+            rows_by_id.setdefault(cue_id, []).append(row)
 
     accepted: dict[int, list[dict[str, Any]]] = {}
     invalid: dict[int, str] = {}
-    for sentence_id in expected_ids:
-        matches = rows_by_id.get(sentence_id, [])
+    for cue_id in expected_ids:
+        matches = rows_by_id.get(cue_id, [])
         if not matches:
-            invalid[sentence_id] = "Pass 3 omitted this source_sentence_id"
+            invalid[cue_id] = "Pass 3 omitted this cue_id"
             continue
         if len(matches) > 1:
-            invalid[sentence_id] = "Pass 3 duplicated this source_sentence_id"
+            invalid[cue_id] = "Pass 3 duplicated this cue_id"
             continue
         try:
-            segments = materialize_sentence_splits(
+            segments = materialize_subcues(
                 tokens,
-                [parents[sentence_id]],
-                {"sentences": matches},
+                [parents[cue_id]],
+                {"cues": matches},
             )
-            accepted[sentence_id] = segments
+            accepted[cue_id] = segments
         except (TypeError, ValueError, RuntimeError) as exc:
-            invalid[sentence_id] = str(exc)
+            invalid[cue_id] = str(exc)
     return accepted, invalid
 
 
-def _assemble_sentence_split_results(
-    parent_segments: list[dict[str, Any]],
+def _assemble_cue_split_results(
+    parent_cues: list[dict[str, Any]],
     accepted: dict[int, list[dict[str, Any]]],
     invalid: dict[int, str],
 ) -> list[dict[str, Any]]:
     segments: list[dict[str, Any]] = []
-    for parent in parent_segments:
-        sentence_id = int(parent["source_sentence_id"])
-        if sentence_id in accepted:
-            segments.extend(accepted[sentence_id])
+    for parent in parent_cues:
+        cue_id = int(parent["cue_id"])
+        if cue_id in accepted:
+            segments.extend(accepted[cue_id])
             continue
         flags = list(parent.get("quality_flags") or [])
         if PASS3_INVALID_OUTPUT not in flags:
@@ -1073,12 +1093,10 @@ def _assemble_sentence_split_results(
         segments.append(
             {
                 **parent,
-                "sub_id": 0,
+                "subcue_id": None,
                 "quality_flags": flags,
                 "status": "needs_review",
-                "pass3_error": invalid.get(sentence_id, "Pass 3 did not return a usable split"),
+                "pass3_error": invalid.get(cue_id, "Pass 3 did not return a usable split"),
             }
         )
     return segments
-
-

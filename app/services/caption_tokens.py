@@ -60,7 +60,7 @@ def reconstruct_vtt_tokens(path: Path, source: str = "youtube") -> list[dict[str
         if new_tokens:
             _assign_token_intervals(new_tokens, int(caption["start_ms"]), int(caption["end_ms"]))
             for token in new_tokens:
-                token["sequence"] = len(emitted)
+                token["token_id"] = len(emitted)
                 token["source"] = source
                 emitted.append(token)
         previous_snapshot = normalized
@@ -87,7 +87,7 @@ def tokens_from_segments(
             word_end = start_ms + round(duration * (index + 1) / len(words))
             tokens.append(
                 {
-                    "sequence": len(tokens),
+                    "token_id": len(tokens),
                     "text": word,
                     "raw_text": word,
                     "normalized_text": word,
@@ -174,7 +174,7 @@ def _assign_token_intervals(tokens: list[dict[str, Any]], cue_start: int, cue_en
 
 def _normalize_global_timing(tokens: list[dict[str, Any]]) -> None:
     for index, token in enumerate(tokens):
-        token["sequence"] = index
+        token["token_id"] = index
         token["start_ms"] = max(0, int(token["start_ms"]))
         token["end_ms"] = max(token["start_ms"] + 1, int(token["end_ms"]))
         if index and token["start_ms"] < tokens[index - 1]["start_ms"]:

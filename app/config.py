@@ -88,7 +88,7 @@ class Settings:
     root_dir: Path = ROOT_DIR
     data_dir: Path = Path(os.getenv("VIDEO_TRANSLATOR_DATA_DIR", ROOT_DIR / "data"))
     database_path: Path = Path(
-        os.getenv("VIDEO_TRANSLATOR_DB", ROOT_DIR / "data" / "video_translator.db")
+        os.getenv("VIDEO_TRANSLATOR_DB", ROOT_DIR / "data" / "video_translator_v2.db")
     )
     output_dir: Path = ROOT_DIR / os.getenv("VIDEO_TRANSLATOR_OUTPUT_DIR", "output")
     translation_providers: tuple[str, ...] = tuple(

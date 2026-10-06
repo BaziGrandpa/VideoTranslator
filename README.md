@@ -24,7 +24,7 @@ A local-first workbench for translating and burning subtitles into YouTube video
 
 Pass 2 Chinese punctuation is retained in SQLite and in editable subtitle text. The browser
 preview, exact preview, ASS render, and exported Chinese SRT remove trailing commas and periods
-from displayed cues. Length and reading-speed checks use this displayed text.
+from displayed Segments. Length and reading-speed checks use this displayed text.
 
 The sidebar provider selector supports `Auto: Codex → Grok`, `Codex only`, and `Grok only`.
 The selection is stored per project and is locked while that project is processing. When Codex is
@@ -64,7 +64,7 @@ The default translation order is shown below. Leave model names blank to use the
 
 ```dotenv
 TRANSLATION_PROVIDERS=codex,grok
-CODEX_MODEL=gpt-5.6-terra
+CODEX_MODEL=
 GROK_MODEL=
 CODEX_REASONING_EFFORT=high
 ```
@@ -137,14 +137,14 @@ list. Its response contains only `after_token_id` and one punctuation mark per s
 Python validates every annotation before committing the whole Part. A failed or interrupted
 request reports its Part and cause, stops before Pass 0, and is not automatically sent again.
 The stored marks form a punctuated reading view for all later Passes and English subtitles;
-the immutable `timed_tokens` rows retain their original words and timestamps. A full subtitle
-rebuild clears this stage and enters the new flow. Existing projects are otherwise left as-is.
+the immutable `tokens` rows retain their original words and timestamps. A full subtitle
+rebuild clears this stage and enters the new flow.
 
 Python must apply only explicit, deterministic rules to model output. It may cut source Cues,
 split at Chinese punctuation, calculate timing and flags, and reject invalid results. It must
 not invent, paraphrase, redistribute, or silently fill Chinese text to make a Pass appear to
 succeed. Mechanical boundary estimates are reviewable fallbacks, not evidence that the
-Chinese matches the English. If Pass 2 returns an empty `chinese_sentence`, reject that
+Chinese matches the English. If Pass 2 returns an empty `target_text`, reject that
 Part's output and inspect Pass 2's prompt and inputs; do not ask another model call or Python
 to supply the missing translation. Apply the same ownership rule to problems in other Passes.
 
@@ -152,7 +152,7 @@ to supply the missing translation. Apply the same ownership rule to problems in 
 
 ```text
 data/
-├─ video_translator.db
+├─ video_translator_v2.db
 └─ projects/{project_id}/
    ├─ metadata.json
    ├─ source/
@@ -165,8 +165,8 @@ output/
    └─ final-v002.mp4
 ```
 
-SQLite stores projects, jobs, immutable timed tokens, subtitle parts, translation contexts,
-and editable subtitle cues. Video files stay in their project directories. Videos up to 40
+SQLite stores projects, jobs, immutable Tokens, Parts, punctuation marks, translation
+contexts, Cues, optional Sub-cues, final Segments, and their provenance links. Video files stay in their project directories. Videos up to 40
 minutes use one Part; longer videos use balanced 20–40 minute Parts centered around 30 minutes.
 A Part is the unit for the Punctuation Pass and each Pass 1, Pass 2, and Pass 3 model call.
 
@@ -206,13 +206,14 @@ the bottom mask without restarting the application. The panel no longer changes 
 `Save style` stores the project values and refreshes the lightweight CSS preview. Pressing Enter in
 any style input performs the same save. `Copy` stores every visible style value in the local
 workbench clipboard, while `Paste` applies and immediately saves it to another project. `Show
-English subtitles` switches the project between Chinese-only and bilingual preview/render output;
-new projects default to bilingual output.
+English subtitles` switches the project between Chinese-only and bilingual preview/render output.
+New projects copy the most recently saved English-subtitle setting; before the first save, they
+default to bilingual output.
 
 Use `Preview` independently when final visual accuracy matters. It pauses the video and
 replaces it with a PNG rendered using the same ASS and filter settings as the final MP4. Clicking the
 left or right half moves to the previous or next subtitle midpoint, and selecting a subtitle renders
-that cue. Saved style changes refresh the PNG only while exact preview is active. The button becomes
+that Segment. Saved style changes refresh the PNG only while exact preview is active. The button becomes
 `Exit preview` while active; exiting removes its temporary images and returns to the browser timing
 preview.
 
@@ -227,58 +228,48 @@ overwrites an earlier MP4. The project page points to the newest completed versi
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m pytest -q --ignore=tests/test_renderer_integration.py
 .\.venv\Scripts\python.exe -m ruff check .
 node --check app/static/app.js
 ```
 
-## Current scope
+## Domain model and storage
 
-Python first divides each Part into fixed Cues using English punctuation, speaker changes, and
-word-level pauses. The stored Cue ID is `source_sentence_id`, numbered from 1 inside the Part.
-Short comma/colon/semicolon fragments merge right; short complete sentences normally merge left.
-A 1,200 ms pause prevents merging. Known stage directions and speaker markers retain their Token
-IDs but are hidden from visible subtitles. A screen row is a Sub-cue: `sub_id` 0 when the Cue
-was not split, or 1, 2, 3 after Pass 3. The workbench row key remains `segments.id`.
+| Concept | Identity and purpose | Storage |
+| --- | --- | --- |
+| Token | Original English word and time anchor; `token_id` starts at 0 per project. | `tokens` |
+| Part | Processing range; `part_number` starts at 1 per project. | `parts` |
+| Cue | Python-cut English range; `cue_id` starts at 1 inside a Part. Pass 2 stores Chinese here. | `cues` |
+| Sub-cue | Optional validated Pass 3 split; `subcue_id` starts at 1 inside a Cue. | `subcues` |
+| Segment | Final editable on-screen subtitle; `segment_order` starts at 1 per project. | `segments` |
 
-Pass 2 makes one call for the complete Part. It receives ordered IDs and clean English, the full
-Pass 1 translation, and project context, but no word-level Token IDs or timestamps. It places the
-Pass 1 Chinese back onto those English cues. Adjacent cues must stay one unfolding thought:
-concatenating their Chinese should recover Pass 1, without extra, missing, or repeated facts.
-Python rejects missing, duplicate, reordered, or empty ID rows.
+`segment_components` links each Segment to one or more Cues or Sub-cues. A whole Cue
+has a component with a null `subcue_id`. The same Segment can contain several
+Sub-cues or several whole Cues after final merging. The Sub-cue rows remain stored
+before final merging, so a bad split can be inspected. Cues also record split status
+and errors. Segment text retains its final punctuation in SQLite. Display and render
+strip trailing punctuation according to the subtitle display rules.
 
-Python sends only Chinese parents above 24 display units to Pass 3. If Chinese punctuation can
-split a parent, Python does that first and Pass 3-1 only fills `end_token_id`. Otherwise Pass 3-2
-splits the Chinese and assigns ends. Prefer 18 display units when already splitting; 24 is the hard
-max. Python infers every start, requires strictly increasing ends and exact parent coverage, then
-merges sub-cues with at most three spoken Tokens into an adjacent sub-cue in the same parent when
-the combined Chinese stays within 24 display units. It stamps length, duration, and reading-speed
-flags once on the Part's final cues. Pass 3 does not perform semantic or terminology auditing.
+Pass 1 writes the full Part `target_text` and controls natural Chinese length and
+punctuation across the Part. The final Chinese subtitle is the primary product;
+English Tokens provide the timing coordinates. Pass 2 assigns Chinese text to every
+fixed Cue and writes those rows to `cues`. Pass 3-1 assigns Token boundaries to
+Chinese pieces already split at punctuation. Pass 3-2 splits the other long Chinese
+Cues and assigns boundaries. Python validates and stores the pre-merge Sub-cues,
+then stores final Segments and their component links. Final Segments need not match
+source Cues one to one. Manual edits change Segments, not Tokens or Cues.
 
-Before the final Part cues are stored, Python also merges an unsplit Cue whose Chinese has at most
-three Chinese characters and ends with a period into the preceding unsplit Cue in the same Part,
-provided the token ranges are adjacent, the pause is under 1,200 ms, and the combined displayed
-Chinese does not exceed 24 units. Cues without a final period stay separate under this rule.
-The merged row keeps the preceding source Cue ID; later source Cue IDs do not change, while final
-subtitle `sequence` values remain consecutive.
+Pass 0 writes `translation_contexts`; the Punctuation Pass writes `part_punctuation`
+and `punctuation_marks`. The old `data/video_translator.db` is deliberately not
+migrated. The default database is `data/video_translator_v2.db`; use a new database
+when starting this schema.
 
-The review workbench lists cues that are over 24 units, shorter than 700 ms, longer than 5000 ms
-with fewer than 2.5 display units/s, faster than 12 units/s, or that Pass 3 failed to split.
-There is no severity and no Apply suggestion path.
-
-Generation, context, Part-level review requests, parsed provider responses, validation errors and
-final results are recorded under each project's `artifacts/translation-audit/`. Records include
-the prompt version, requested model and provider (CLI-default models are not inferred).
-
-The browser Rebuild dialog supports two modes. Full rebuild clears the old subtitle pipeline
-state immediately. Selected Parts is available after one completed translation that stored Cue
-IDs. It keeps Timed Tokens, the approved Pass 0 guidance, and the current subtitles. Each
-selected Part reruns Pass 1, Pass 2, and Pass 3 for that whole Part. Unselected Parts stay as
-they are. Existing subtitles stay visible and read-only until every selected Part is published
-together. A revision guard prevents manual edits made during processing from being overwritten.
+The browser Rebuild dialog supports a full rebuild or selected Parts. Selected Parts
+keep the approved Pass 0 guidance and current visible Segments while Pass 1–3 run.
+After all selected Parts pass validation, their Cues, Sub-cues, and Segments publish
+together under a revision guard.
 
 - Each project handles one source video, not a playlist.
 - Only YouTube URLs are accepted.
-- Automatic translation defaults from English to Chinese and uses subscription CLIs, not API keys.
-- The browser provides real-time timing previews; FFmpeg/libass generates the final image.
-- Bilibili upload and thumbnail generation are not included yet.
+- Translation uses authenticated local CLIs, not API keys.
+- The browser previews timing; FFmpeg/libass generates the final image.

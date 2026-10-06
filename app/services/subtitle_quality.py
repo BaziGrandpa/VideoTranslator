@@ -3,7 +3,7 @@ from __future__ import annotations
 import unicodedata
 from dataclasses import asdict, dataclass
 
-from app.services.subtitle_text import display_translated_text
+from app.services.subtitle_text import display_target_text
 
 
 @dataclass(frozen=True)
@@ -15,7 +15,7 @@ class SubtitleQualityRules:
     normal_max_target_units: int = 18
     max_target_units: int = 24
     allowed_over_normal_ratio: float = 0.02
-    min_long_cue_units_per_second: float = 2.5
+    min_long_segment_units_per_second: float = 2.5
     max_target_units_per_second: float = 12.0
 
     def payload(self) -> dict:
@@ -23,14 +23,14 @@ class SubtitleQualityRules:
 
 
 RULES = SubtitleQualityRules()
-PROMPT_VERSION = "sentence-pipeline-v8.10"
+PROMPT_VERSION = "cue-segment-pipeline-v1"
 
 
 def target_units(text: str) -> float:
     """Approximate display load: wide characters count as 1, others as 0.5."""
     return sum(
         1.0 if unicodedata.east_asian_width(char) in {"W", "F"} else 0.5
-        for char in display_translated_text(text)
+        for char in display_target_text(text)
         if not char.isspace()
     )
 
@@ -50,7 +50,7 @@ def quality_issues(start_ms: int, end_ms: int, source: str, target: str) -> list
         add("very_short_duration", duration, RULES.short_duration_ms)
     if (
         duration > RULES.max_duration_ms
-        and units_per_second < RULES.min_long_cue_units_per_second
+        and units_per_second < RULES.min_long_segment_units_per_second
     ):
         add("very_long_duration", duration, RULES.max_duration_ms)
     if units and units_per_second > RULES.max_target_units_per_second:
@@ -67,7 +67,7 @@ def analyze_quality(start_ms: int, end_ms: int, source_text: str, translation: s
 PASS3_INVALID_OUTPUT = "pass3_invalid_output"
 
 
-def stamp_cue_review_flags(segments: list[dict]) -> list[dict]:
+def stamp_segment_review_flags(segments: list[dict]) -> list[dict]:
     """Mark review flags once, after a Part's Pass 3 list is final."""
     stamped: list[dict] = []
     for segment in segments:
@@ -76,7 +76,7 @@ def stamp_cue_review_flags(segments: list[dict]) -> list[dict]:
             int(item["start_ms"]),
             int(item["end_ms"]),
             str(item.get("source_text", "")),
-            str(item.get("translated_text", "")),
+            str(item.get("target_text", "")),
         )
         flags = []
         if PASS3_INVALID_OUTPUT in (segment.get("quality_flags") or []):
@@ -88,12 +88,12 @@ def stamp_cue_review_flags(segments: list[dict]) -> list[dict]:
     return stamped
 
 
-def cue_review_problems(segment: dict) -> list[dict]:
+def segment_review_problems(segment: dict) -> list[dict]:
     problems = quality_issues(
         int(segment["start_ms"]),
         int(segment["end_ms"]),
         str(segment.get("source_text", "")),
-        str(segment.get("translated_text", "")),
+        str(segment.get("target_text", "")),
     )
     if PASS3_INVALID_OUTPUT in (segment.get("quality_flags") or []):
         problems.append({"type": PASS3_INVALID_OUTPUT, "actual": 0, "limit": 0})
@@ -113,7 +113,7 @@ def describe_review_problems(problems: list[dict]) -> str:
         elif kind == "very_long_duration":
             parts.append(
                 f"Duration {actual} ms exceeds {limit} ms, with fewer than "
-                f"{RULES.min_long_cue_units_per_second} display units/s."
+                f"{RULES.min_long_segment_units_per_second} display units/s."
             )
         elif kind == "high_target_reading_speed":
             parts.append(f"Reading speed is {actual} units/s; the limit is {limit}.")
@@ -125,16 +125,16 @@ def describe_review_problems(problems: list[dict]) -> str:
 def summarize_length_budget(segments: list[dict]) -> dict:
     total = len(segments)
     over_normal = sum(
-        target_units(str(segment.get("translated_text", ""))) > RULES.normal_max_target_units
+        target_units(str(segment.get("target_text", ""))) > RULES.normal_max_target_units
         for segment in segments
     )
     over_absolute = sum(
-        target_units(str(segment.get("translated_text", ""))) > RULES.max_target_units
+        target_units(str(segment.get("target_text", ""))) > RULES.max_target_units
         for segment in segments
     )
     allowed_over_normal = max(1, int(total * RULES.allowed_over_normal_ratio)) if total else 0
     return {
-        "total_cues": total,
+        "total_segments": total,
         "soft_limit_units": RULES.normal_max_target_units,
         "absolute_limit_units": RULES.max_target_units,
         "over_soft_limit": over_normal,

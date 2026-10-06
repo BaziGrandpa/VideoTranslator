@@ -46,10 +46,6 @@ def run_worker(once: bool = False, poll_seconds: float = 1.0) -> None:
                 pipeline.rebuild_subtitles(job["project_id"], skip_pass0=True)
             elif job["kind"] == "part_rebuild":
                 pipeline.part_rebuild(job["project_id"])
-            elif job["kind"] == "partial_rebuild":
-                raise RuntimeError(
-                    "Window rebuild is no longer available. Choose Parts and start the rebuild again."
-                )
             elif job["kind"] == "render":
                 pipeline.render(job["project_id"])
             else:

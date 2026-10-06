@@ -80,7 +80,7 @@ button.primary:hover { background: #54e3b3; }
 .part-chip.completed { color: var(--accent); }
 .part-chip.failed, .part-chip.waiting_for_quota { color: var(--warning); }
 
-.global-context-panel { margin-bottom: 20px; padding: 20px; border: 1px solid #315247; border-radius: 14px; background: linear-gradient(145deg, #121a19, var(--panel) 48%); }
+.translation-context-panel { margin-bottom: 20px; padding: 20px; border: 1px solid #315247; border-radius: 14px; background: linear-gradient(145deg, #121a19, var(--panel) 48%); }
 .context-panel-head { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 18px; }
 .context-panel-head h2 { margin: 5px 0 7px; font-size: 22px; }
 .context-panel-head p { max-width: 780px; margin: 0; color: #aeb7c1; font-size: 13px; line-height: 1.55; }

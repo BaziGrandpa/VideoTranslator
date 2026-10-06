@@ -27,7 +27,7 @@ from app.services.exact_preview import (
     preview_processes,
     render_exact_preview,
 )
-from app.services.subtitle_quality import cue_review_problems, describe_review_problems
+from app.services.subtitle_quality import describe_review_problems, segment_review_problems
 from app.services.subtitle_style import merge_subtitle_style
 from app.services.subtitles import validate_segments
 
@@ -76,7 +76,7 @@ class SegmentUpdate(BaseModel):
     start_ms: int | None = Field(default=None, ge=0)
     end_ms: int | None = Field(default=None, ge=1)
     source_text: str | None = None
-    translated_text: str | None = None
+    target_text: str | None = None
     status: str | None = None
 
 
@@ -114,7 +114,7 @@ class CodexModelUpdate(BaseModel):
     codex_model: str = Field(default="", max_length=100, pattern=r"^[A-Za-z0-9._-]*$")
 
 
-class GlobalContextTerm(BaseModel):
+class TranslationContextTerm(BaseModel):
     source: str = Field(min_length=1, max_length=300)
     target: str = Field(min_length=1, max_length=300)
     category: Literal[
@@ -131,10 +131,10 @@ class GlobalContextTerm(BaseModel):
     occurrence_count: int = Field(default=0, ge=0)
 
 
-class GlobalContextUpdate(BaseModel):
+class TranslationContextUpdate(BaseModel):
     overview: str = Field(min_length=1, max_length=12000)
     style: str = Field(default="", max_length=12000)
-    terms: list[GlobalContextTerm] = Field(default_factory=list, max_length=40)
+    terms: list[TranslationContextTerm] = Field(default_factory=list, max_length=40)
 
 
 class ExactPreviewRequest(BaseModel):
@@ -178,7 +178,7 @@ def require_project_not_rendering(project_id: str) -> dict:
     return project
 
 
-def normalize_global_context(payload: GlobalContextUpdate) -> dict:
+def normalize_translation_context(payload: TranslationContextUpdate) -> dict:
     overview = payload.overview.strip()
     if not overview:
         raise HTTPException(status_code=422, detail="Project overview cannot be empty")
@@ -208,14 +208,14 @@ def normalize_global_context(payload: GlobalContextUpdate) -> dict:
     return {"overview": overview, "style": payload.style.strip(), "terms": terms}
 
 
-def require_global_context_review(project_id: str) -> dict:
+def require_translation_context_review(project_id: str) -> dict:
     project = require_project(project_id)
     if project.get("stage") != "waiting_context_review":
         raise HTTPException(
             status_code=409,
             detail="Global translation context can only be edited at the Pass 0 review checkpoint",
         )
-    if not isinstance(project.get("global_translation_context"), dict):
+    if not isinstance(project.get("translation_context"), dict):
         raise HTTPException(status_code=409, detail="Pass 0 has not produced a context to review")
     return project
 
@@ -237,27 +237,27 @@ def _part_has_exact_token_coverage(part: dict, segments: list[dict]) -> bool:
 def build_part_rebuild_scope(project: dict, requested_part_ids: list[int]) -> dict:
     if not requested_part_ids:
         raise HTTPException(status_code=422, detail="Select at least one Part")
-    if not isinstance(project.get("global_translation_context"), dict) or not project.get(
-        "global_context_approved"
+    if not isinstance(project.get("translation_context"), dict) or not project.get(
+        "context_approved"
     ):
         raise HTTPException(
             status_code=409,
             detail="Selected Part rebuild requires approved translation guidance",
         )
-    tokens = repository.list_timed_tokens(str(project["id"]))
-    parts = repository.list_subtitle_parts(str(project["id"]))
+    tokens = repository.list_tokens(str(project["id"]))
+    parts = repository.list_parts(str(project["id"]))
     segments = repository.list_segments(str(project["id"]))
     if not tokens or not parts or not segments:
         raise HTTPException(
             status_code=409,
-            detail="Selected Part rebuild requires existing Tokens, Parts, and Cues",
+            detail="Selected Part rebuild requires existing Tokens, Parts, Cues, and Segments",
         )
-    if any(not repository.list_source_sentences(int(part["id"])) for part in parts):
+    if any(not repository.list_cues(int(part["id"])) for part in parts):
         raise HTTPException(
             status_code=409,
             detail="Run one full rebuild to create Cue IDs before selecting Parts",
         )
-    if any(not isinstance(segment.get("source_sentence_id"), int) for segment in segments):
+    if any(not segment.get("components") for segment in segments):
         raise HTTPException(
             status_code=409,
             detail="Current subtitles predate Cue IDs; run one full rebuild first",
@@ -276,19 +276,19 @@ def build_part_rebuild_scope(project: dict, requested_part_ids: list[int]) -> di
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    f"Part {int(part['sequence']) + 1} no longer has exact Token coverage. "
+                    f"Part {int(part['part_number'])} no longer has exact Token coverage. "
                     "Use a full rebuild."
                 ),
             )
         selected.append(
             {
                 "part_id": int(part["id"]),
-                "part_sequence": int(part["sequence"]),
+                "part_number": int(part["part_number"]),
                 "start_token_id": int(part["start_token_id"]),
                 "end_token_id": int(part["end_token_id"]),
             }
         )
-    selected.sort(key=lambda item: item["part_sequence"])
+    selected.sort(key=lambda item: item["part_number"])
     return {
         "version": 2,
         "run_id": str(uuid.uuid4()),
@@ -367,8 +367,8 @@ def create_project(payload: ProjectCreate) -> dict:
 def get_project(project_id: str) -> dict:
     project = require_project(project_id)
     project["segment_count"] = len(repository.list_segments(project_id))
-    project["token_count"] = len(repository.list_timed_tokens(project_id))
-    project["subtitle_parts"] = repository.list_subtitle_parts(project_id)
+    project["token_count"] = len(repository.list_tokens(project_id))
+    project["parts"] = repository.list_parts(project_id)
     project["provider_usage"] = repository.provider_usage(project_id)
     project["render_is_stale"] = (
         project["rendered_revision"] is not None
@@ -377,27 +377,27 @@ def get_project(project_id: str) -> dict:
     return project
 
 
-@app.patch("/api/projects/{project_id}/global-translation-context")
-def update_global_translation_context(
-    project_id: str, payload: GlobalContextUpdate
+@app.patch("/api/projects/{project_id}/translation-context")
+def update_translation_context(
+    project_id: str, payload: TranslationContextUpdate
 ) -> dict:
-    require_global_context_review(project_id)
-    context = normalize_global_context(payload)
-    repository.update_project(project_id, global_translation_context=context)
+    require_translation_context_review(project_id)
+    context = normalize_translation_context(payload)
+    repository.update_project(project_id, translation_context=context)
     return context
 
 
-@app.post("/api/projects/{project_id}/global-translation-context/approve")
-def approve_global_translation_context(
-    project_id: str, payload: GlobalContextUpdate
+@app.post("/api/projects/{project_id}/translation-context/approve")
+def approve_translation_context(
+    project_id: str, payload: TranslationContextUpdate
 ) -> dict:
-    project = require_global_context_review(project_id)
-    context = normalize_global_context(payload)
+    project = require_translation_context_review(project_id)
+    context = normalize_translation_context(payload)
     partial = isinstance(project.get("pending_rebuild_scope"), dict)
     repository.update_project(
         project_id,
-        global_translation_context=context,
-        global_context_approved=1,
+        translation_context=context,
+        context_approved=1,
         status="queued",
         stage="part_rebuild_queued" if partial else "queued",
         progress=68,
@@ -501,7 +501,7 @@ def retry_project(project_id: str) -> dict:
         raise HTTPException(
             status_code=409, detail="Only failed or quota-paused projects can be retried"
         )
-    tokens = repository.list_timed_tokens(project_id)
+    tokens = repository.list_tokens(project_id)
     if project.get("video_path") and (tokens or repository.list_segments(project_id)):
         kind = "translate"
     else:
@@ -513,9 +513,9 @@ def retry_project(project_id: str) -> dict:
 @app.get("/api/projects/{project_id}/rebuild-parts")
 def list_rebuild_parts(project_id: str) -> dict:
     project = require_project(project_id)
-    tokens = repository.list_timed_tokens(project_id)
-    parts = repository.list_subtitle_parts(project_id)
-    pass0_available = isinstance(project.get("global_translation_context"), dict)
+    tokens = repository.list_tokens(project_id)
+    parts = repository.list_parts(project_id)
+    pass0_available = isinstance(project.get("translation_context"), dict)
     if not tokens:
         return {
             "parts": [],
@@ -530,21 +530,21 @@ def list_rebuild_parts(project_id: str) -> dict:
         result.append(
             {
                 "part_id": int(part["id"]),
-                "part_number": int(part["sequence"]) + 1,
+                "part_number": int(part["part_number"]),
                 "start_token_id": start,
                 "end_token_id": end,
                 "start_ms": int(part["start_ms"]),
                 "end_ms": int(part["end_ms"]),
-                "cue_count": len(repository.list_source_sentences(int(part["id"]))),
+                "cue_count": len(repository.list_cues(int(part["id"]))),
                 "preview": preview,
             }
         )
     cue_maps_ready = bool(parts) and all(item["cue_count"] for item in result)
     tracked_segments = repository.list_segments(project_id)
     segments_ready = bool(tracked_segments) and all(
-        isinstance(segment.get("source_sentence_id"), int) for segment in tracked_segments
+        bool(segment.get("components")) for segment in tracked_segments
     )
-    guidance_ready = pass0_available and bool(project.get("global_context_approved"))
+    guidance_ready = pass0_available and bool(project.get("context_approved"))
     return {
         "parts": result,
         "selected_rebuild_available": bool(
@@ -567,12 +567,12 @@ def rebuild_subtitles(project_id: str, payload: SubtitleRebuildRequest) -> dict:
         return repository.enqueue_job(
             project_id, "part_rebuild", return_status=project["status"]
         )
-    if payload.skip_pass0 and not isinstance(project.get("global_translation_context"), dict):
+    if payload.skip_pass0 and not isinstance(project.get("translation_context"), dict):
         raise HTTPException(status_code=409, detail="Pass 0 has no existing context to reuse")
     # Rebuild is destructive by design. Clear the previous subtitle pipeline state
-    # synchronously so the API response never leaves stale cues visible while the
+    # synchronously so the API response never leaves stale Segments visible while the
     # replacement job waits for a worker.
-    repository.clear_subtitle_data(project_id, preserve_global_context=payload.skip_pass0)
+    repository.clear_subtitle_data(project_id, preserve_translation_context=payload.skip_pass0)
     job_kind = "rebuild_subtitles_skip_pass0" if payload.skip_pass0 else "rebuild_subtitles"
     return repository.enqueue_job(project_id, job_kind)
 
@@ -588,7 +588,7 @@ def list_review_issues(project_id: str) -> list[dict]:
     require_project(project_id)
     result: list[dict] = []
     for segment in repository.list_segments(project_id):
-        problems = cue_review_problems(segment)
+        problems = segment_review_problems(segment)
         if not problems:
             continue
         result.append(
@@ -763,7 +763,7 @@ def approve_and_render(project_id: str) -> dict:
         raise HTTPException(
             status_code=409, detail="The project cannot be rendered in its current state"
         )
-    parts = repository.list_subtitle_parts(project_id)
+    parts = repository.list_parts(project_id)
     if parts and any(part["status"] != "completed" for part in parts):
         raise HTTPException(
             status_code=409,

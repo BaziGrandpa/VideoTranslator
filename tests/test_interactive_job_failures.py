@@ -67,7 +67,7 @@ def test_failed_part_test_releases_scope_and_preserves_existing_cues(
     repository.update_project(project_id, status="waiting_review", stage="waiting_review")
     repository.replace_segments(
         project_id,
-        [{"start_ms": 0, "end_ms": 1000, "source_text": "Hello", "translated_text": "旧字幕"}],
+        [{"start_ms": 0, "end_ms": 1000, "source_text": "Hello", "target_text": "旧字幕"}],
     )
     before = repository.list_segments(project_id)
     repository.begin_part_rebuild(project_id, {"run_id": "test", "parts": []})
@@ -160,7 +160,7 @@ def test_render_failure_can_be_followed_by_new_manual_render(tmp_path: Path, mon
     repository.update_project(project_id, status="waiting_review", stage="waiting_review")
     repository.replace_segments(
         project_id,
-        [{"start_ms": 0, "end_ms": 1000, "source_text": "Hello", "translated_text": "你好"}],
+        [{"start_ms": 0, "end_ms": 1000, "source_text": "Hello", "target_text": "你好"}],
     )
 
     first = client.post(f"/api/projects/{project_id}/approve-and-render", json={})
@@ -183,44 +183,33 @@ def test_pass2_rolls_back_sentences_when_cue_write_fails(tmp_path: Path, monkeyp
         project_id,
         [{"start_token_id": 0, "end_token_id": 0, "start_ms": 0, "end_ms": 1000}],
     )
-    part_id = repository.list_subtitle_parts(project_id)[0]["id"]
+    part_id = repository.list_parts(project_id)[0]["id"]
     sentence = {
-        "source_sentence_id": 1,
+        "cue_id": 1,
         "start_token_id": 0,
         "end_token_id": 0,
         "start_ms": 0,
         "end_ms": 1000,
-        "source_sentence": "Hello.",
-        "chinese_sentence": "旧译文",
-    }
-    repository.replace_source_sentences(project_id, part_id, [sentence])
-    segment = {
-        "start_token_id": 0,
-        "end_token_id": 0,
-        "start_ms": 0,
-        "end_ms": 1000,
-        "source_sentence_id": 1,
         "source_text": "Hello.",
-        "translated_text": "新译文",
+        "target_text": "旧译文",
     }
+    repository.replace_cues(project_id, part_id, [sentence])
 
-    def fail_cue_write(*_args, **_kwargs):
+    original = repository.replace_cues
+
+    def fail_cue_write(*args, **kwargs):
+        original(*args, **kwargs)
         raise RuntimeError("cue insert failed")
 
-    original = repository.replace_part_segments
-    monkeypatch.setattr(repository, "replace_part_segments", fail_cue_write)
+    monkeypatch.setattr(repository, "replace_cues", fail_cue_write)
     with pytest.raises(RuntimeError, match="cue insert failed"):
-        repository.commit_pass2(
-            project_id, part_id, [{**sentence, "chinese_sentence": "新译文"}], [segment]
-        )
-    assert repository.list_source_sentences(part_id)[0]["chinese_sentence"] == "旧译文"
+        repository.commit_pass2(project_id, part_id, [{**sentence, "target_text": "新译文"}])
+    assert repository.list_cues(part_id)[0]["target_text"] == "旧译文"
     assert repository.list_segments(project_id) == []
-    assert repository.list_subtitle_parts(project_id)[0]["status"] == "pending"
+    assert repository.list_parts(project_id)[0]["status"] == "pending"
 
-    monkeypatch.setattr(repository, "replace_part_segments", original)
-    repository.commit_pass2(
-        project_id, part_id, [{**sentence, "chinese_sentence": "新译文"}], [segment]
-    )
-    assert repository.list_source_sentences(part_id)[0]["chinese_sentence"] == "新译文"
-    assert repository.list_segments(project_id)[0]["translated_text"] == "新译文"
-    assert repository.list_subtitle_parts(project_id)[0]["status"] == "pass2_complete"
+    monkeypatch.setattr(repository, "replace_cues", original)
+    repository.commit_pass2(project_id, part_id, [{**sentence, "target_text": "新译文"}])
+    assert repository.list_cues(part_id)[0]["target_text"] == "新译文"
+    assert repository.list_segments(project_id) == []
+    assert repository.list_parts(project_id)[0]["status"] == "pass2_complete"

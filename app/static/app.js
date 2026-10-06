@@ -68,12 +68,12 @@ const stageNames = {
   reconstructing_timeline: "Reconstructing the word-level timeline",
   restoring_punctuation: "Restoring English punctuation",
   transcribing: "No subtitles found; transcribing audio",
-  building_global_context: "Building global names and terminology",
+  building_translation_context: "Building global names and terminology",
   waiting_context_review: "Waiting for Pass 0 translation guidance review",
   translating: "Generating translations",
-  translating_reference: "Translating the complete Part as coherent text",
-  planning_subtitles: "Placing the Part translation onto cues",
-  auditing_subtitles: "Splitting overlong Chinese cues",
+  translating_part: "Translating the complete Part as coherent text",
+  aligning_cues: "Placing the Part translation onto cues",
+  splitting_cues: "Splitting overlong Chinese cues",
   waiting_for_quota: "Paused at a saved checkpoint; waiting for CLI quota",
   validating_subtitles: "Validating timing and readability",
   rebuild_queued: "Queued for subtitle rebuilding",
@@ -92,8 +92,8 @@ function formatPipelineDetail(detail) {
   if (Number.isInteger(detail.part)) {
     items.push(`Part ${detail.part}${Number.isInteger(detail.part_count) ? `/${detail.part_count}` : ""}`);
   }
-  if (Number.isInteger(detail.source_sentence_count)) {
-    items.push(`${detail.source_sentence_count} cues`);
+  if (Number.isInteger(detail.cue_count)) {
+    items.push(`${detail.cue_count} cues`);
   }
   if (Number.isInteger(detail.start_token_id) && Number.isInteger(detail.end_token_id)) {
     items.push(`Tokens ${detail.start_token_id}–${detail.end_token_id}`);
@@ -124,7 +124,9 @@ async function api(url, options = {}) {
     ...options,
   });
   if (!response.ok) {
-    throw new Error(await readApiError(response));
+    const error = new Error(await readApiError(response));
+    error.status = response.status;
+    throw error;
   }
   return response.json();
 }
@@ -326,7 +328,12 @@ async function openProject(projectId) {
   if (state.exactPreview.open) {
     await discardExactPreview();
   }
-  state.project = await api(`/api/projects/${projectId}`);
+  try {
+    state.project = await api(`/api/projects/${projectId}`);
+  } catch (error) {
+    if (reloadAfterMissingProject(error)) return;
+    throw error;
+  }
   state.segments = [];
   state.reviewIssues = [];
   state.reviewMode = false;
@@ -379,11 +386,11 @@ function renderProject() {
   errorBox.textContent = project.error || "";
   errorBox.classList.toggle("hidden", !project.error);
   const partProgress = $("#part-progress");
-  const parts = project.subtitle_parts || [];
+  const parts = project.parts || [];
   partProgress.innerHTML = parts.map((part) =>
-    `<span class="part-chip ${escapeHtml(part.status)}">Part ${part.sequence + 1}/${parts.length}: ${escapeHtml(part.status)}</span>`
+    `<span class="part-chip ${escapeHtml(part.status)}">Part ${part.part_number}/${parts.length}: ${escapeHtml(part.status)}</span>`
   ).join("");
-  renderGlobalContextPanel(project);
+  renderTranslationContextPanel(project);
 
   const actions = $("#project-actions");
   actions.innerHTML = "";
@@ -455,7 +462,7 @@ function renderProject() {
   }
 }
 
-const globalContextCategories = [
+const translationContextCategories = [
   "person",
   "organization",
   "brand",
@@ -466,12 +473,12 @@ const globalContextCategories = [
   "other",
 ];
 
-function setGlobalContextDirty() {
+function setTranslationContextDirty() {
   state.contextDirty = true;
   $("#context-save-state").textContent = "Unsaved changes";
 }
 
-function createGlobalContextTermRow(term = {}) {
+function createTranslationContextTermRow(term = {}) {
   const row = document.createElement("div");
   row.className = "context-term-row";
 
@@ -491,7 +498,7 @@ function createGlobalContextTermRow(term = {}) {
 
   const category = document.createElement("select");
   category.className = "context-term-category";
-  globalContextCategories.forEach((value) => {
+  translationContextCategories.forEach((value) => {
     const option = document.createElement("option");
     option.value = value;
     option.textContent = value.charAt(0).toUpperCase() + value.slice(1);
@@ -530,19 +537,19 @@ function createGlobalContextTermRow(term = {}) {
   remove.title = "Remove term";
   remove.addEventListener("click", () => {
     row.remove();
-    if (!$("#context-terms").children.length) renderGlobalContextTerms([]);
-    setGlobalContextDirty();
+    if (!$("#context-terms").children.length) renderTranslationContextTerms([]);
+    setTranslationContextDirty();
   });
 
   [source, target, category, mustUse].forEach((control) => {
-    control.addEventListener("input", setGlobalContextDirty);
-    control.addEventListener("change", setGlobalContextDirty);
+    control.addEventListener("input", setTranslationContextDirty);
+    control.addEventListener("change", setTranslationContextDirty);
   });
   row.append(source, target, occurrence, category, mustUseLabel, remove);
   return row;
 }
 
-function renderGlobalContextTerms(terms) {
+function renderTranslationContextTerms(terms) {
   const container = $("#context-terms");
   container.innerHTML = "";
   if (!terms.length) {
@@ -552,28 +559,28 @@ function renderGlobalContextTerms(terms) {
     container.append(empty);
     return;
   }
-  terms.forEach((term) => container.append(createGlobalContextTermRow(term)));
+  terms.forEach((term) => container.append(createTranslationContextTermRow(term)));
 }
 
-function renderGlobalContextPanel(project) {
-  const panel = $("#global-context-panel");
+function renderTranslationContextPanel(project) {
+  const panel = $("#translation-context-panel");
   const isWaiting = project.stage === "waiting_context_review"
-    && project.global_translation_context;
+    && project.translation_context;
   panel.classList.toggle("hidden", !isWaiting);
   if (!isWaiting || state.contextDirty) return;
-  const context = project.global_translation_context;
+  const context = project.translation_context;
   panel.dataset.projectId = project.id;
   $("#context-overview").value = context.overview || "";
   $("#context-style").value = context.style || "";
-  $("#context-provider").textContent = project.global_context_provider
-    ? `Generated by ${project.global_context_provider}`
+  $("#context-provider").textContent = project.context_provider
+    ? `Generated by ${project.context_provider}`
     : "Generated context";
   $("#context-save-state").textContent = "Review required before Pass 1";
   $("#context-error").classList.add("hidden");
-  renderGlobalContextTerms(Array.isArray(context.terms) ? context.terms : []);
+  renderTranslationContextTerms(Array.isArray(context.terms) ? context.terms : []);
 }
 
-function readGlobalContextPanel() {
+function readTranslationContextPanel() {
   const overview = $("#context-overview").value.trim();
   if (!overview) throw new Error("Project overview cannot be empty");
   const terms = [];
@@ -597,9 +604,9 @@ function readGlobalContextPanel() {
   return { overview, style: $("#context-style").value.trim(), terms };
 }
 
-async function saveGlobalContext({ approve = false } = {}) {
+async function saveTranslationContext({ approve = false } = {}) {
   if (!state.project || state.contextSavePromise) return false;
-  const task = performSaveGlobalContext(approve);
+  const task = performSaveTranslationContext(approve);
   state.contextSavePromise = task;
   try {
     return await task;
@@ -608,7 +615,7 @@ async function saveGlobalContext({ approve = false } = {}) {
   }
 }
 
-async function performSaveGlobalContext(approve) {
+async function performSaveTranslationContext(approve) {
   const errorBox = $("#context-error");
   const saveButton = $("#save-context-draft");
   const approveButton = $("#approve-context");
@@ -617,17 +624,17 @@ async function performSaveGlobalContext(approve) {
   approveButton.disabled = true;
   $("#context-save-state").textContent = approve ? "Saving and queuing Pass 1…" : "Saving…";
   try {
-    const payload = readGlobalContextPanel();
+    const payload = readTranslationContextPanel();
     const suffix = approve ? "/approve" : "";
     const result = await api(
-      `/api/projects/${state.project.id}/global-translation-context${suffix}`,
+      `/api/projects/${state.project.id}/translation-context${suffix}`,
       { method: approve ? "POST" : "PATCH", body: JSON.stringify(payload) },
     );
-    state.project.global_translation_context = approve ? result.context : result;
+    state.project.translation_context = approve ? result.context : result;
     state.contextDirty = false;
     if (approve) {
       const partial = Boolean(state.project.pending_rebuild_scope);
-      state.project.global_context_approved = true;
+      state.project.context_approved = true;
       state.project.status = "queued";
       state.project.stage = partial ? "part_rebuild_queued" : "queued";
       state.project.progress = 68;
@@ -764,7 +771,7 @@ function renderSegments() {
       ${timeFieldsMarkup(segment, flaggedIds.has(segment.id))}
       <div class="text-fields">
         <textarea class="source" aria-label="English subtitle">${escapeHtml(segment.source_text)}</textarea>
-        <textarea class="translation" aria-label="Translated subtitle">${escapeHtml(segment.translated_text)}</textarea>
+        <textarea class="translation" aria-label="Translated subtitle">${escapeHtml(segment.target_text)}</textarea>
       </div>
       <label class="review-check"><input class="reviewed" type="checkbox" ${segment.status === "reviewed" ? "checked" : ""} aria-label="Reviewed" /></label>
     </div>`).join("");
@@ -775,7 +782,7 @@ function renderSegments() {
       if (!event.target.matches("input,textarea,button")) selectSegment(id, true);
       else selectSegment(id, false);
     });
-    for (const [selector, field] of [[".source", "source_text"], [".translation", "translated_text"]]) {
+    for (const [selector, field] of [[".source", "source_text"], [".translation", "target_text"]]) {
       const input = row.querySelector(selector);
       input.addEventListener("input", (event) => editSegmentText(id, field, event.target.value));
       input.addEventListener("blur", (event) => void saveSegmentText(id, field, event.target.value));
@@ -793,7 +800,7 @@ function renderSegments() {
 function issueLabel(issue) {
   const types = issue.issue_types || [];
   if (types.includes("pass3_invalid_output")) return "Pass 3 split failed";
-  if (types.includes("target_text_too_long")) return "Overlong cue";
+  if (types.includes("target_text_too_long")) return "Overlong subtitle";
   if (types.includes("very_long_duration")) return "Long duration";
   if (types.includes("very_short_duration")) return "Short duration";
   if (types.includes("high_target_reading_speed")) return "Fast reading speed";
@@ -808,13 +815,13 @@ function renderReviewIssues(list) {
           ${timeFieldsMarkup(segment, false)}
           <div class="text-fields review-text-fields">
             <textarea class="source" aria-label="English subtitle" readonly>${escapeHtml(segment.source_text)}</textarea>
-            <textarea class="translation" aria-label="Current translated subtitle">${escapeHtml(segment.translated_text)}</textarea>
+            <textarea class="translation" aria-label="Current translated subtitle">${escapeHtml(segment.target_text)}</textarea>
             <div class="suggestion-row diagnostic">
               <div class="suggestion-text"><span class="suggestion-label">Review note</span>${escapeHtml(issue.reason)}</div>
             </div>
           </div>
           <label class="review-check"><input class="reviewed" type="checkbox" ${segment.status === "reviewed" ? "checked" : ""} aria-label="Reviewed" /></label>
-        </div>` : `<div class="review-issue-missing">The original cue boundaries have changed.</div>`;
+        </div>` : `<div class="review-issue-missing">The subtitle has changed.</div>`;
     return `
       <section class="review-issue" data-issue-id="${escapeHtml(issue.id)}">
         <div class="review-issue-head">
@@ -833,12 +840,12 @@ function renderReviewIssues(list) {
       else if (!event.target.matches("button")) selectSegment(id, false);
     });
     const translation = row.querySelector(".translation");
-    translation.addEventListener("input", (event) => editSegmentText(id, "translated_text", event.target.value));
-    translation.addEventListener("blur", (event) => void saveSegmentText(id, "translated_text", event.target.value));
+    translation.addEventListener("input", (event) => editSegmentText(id, "target_text", event.target.value));
+    translation.addEventListener("blur", (event) => void saveSegmentText(id, "target_text", event.target.value));
     translation.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
       event.preventDefault();
-      void saveSegmentText(id, "translated_text", event.target.value);
+      void saveSegmentText(id, "target_text", event.target.value);
     });
     bindTimingControls(row, id);
     row.querySelector(".reviewed").addEventListener("change", (event) => saveSegment(id, { status: event.target.checked ? "reviewed" : "edited" }, true));
@@ -1038,14 +1045,14 @@ function saveSegment(id, patch, rerender = false) {
         const index = state.segments.findIndex((item) => item.id === id);
         if (index >= 0) {
           const local = state.segments[index];
-          for (const field of ["source_text", "translated_text"]) {
+          for (const field of ["source_text", "target_text"]) {
             if (state.unsavedSegmentFields.has(`${id}:${field}`)) {
               updated[field] = local[field];
             }
           }
           if (
             state.unsavedSegmentFields.has(`${id}:source_text`)
-            || state.unsavedSegmentFields.has(`${id}:translated_text`)
+            || state.unsavedSegmentFields.has(`${id}:target_text`)
           ) {
             updated.status = local.status;
           }
@@ -1121,7 +1128,7 @@ function updatePreview() {
     preview.classList.add("hidden");
     return;
   }
-  $("#preview-cn").textContent = active.translated_text.replace(
+  $("#preview-cn").textContent = active.target_text.replace(
     /[，。,.—–―⸺⸻]+(?=\s*["'”’》」』】）)]*\s*$)/u,
     "",
   );
@@ -1176,7 +1183,7 @@ function toggleVideoPlaybackFromKeyboard(event) {
   else video.pause();
 }
 
-function focusFirstInvalidCueFromError(message) {
+function focusFirstInvalidSegmentFromError(message) {
   const video = $("#video");
   const workspace = $("#review-workspace");
   if (
@@ -1185,13 +1192,13 @@ function focusFirstInvalidCueFromError(message) {
     || workspace.classList.contains("hidden")
     || workspace.inert
   ) return;
-  const cueNumbers = [];
+  const subtitleNumbers = [];
   for (const match of String(message).matchAll(/\bSubtitles?\s+(\d+)(?:\s+and\s+(\d+))?/gi)) {
-    cueNumbers.push(Number(match[1]));
-    if (match[2]) cueNumbers.push(Number(match[2]));
+    subtitleNumbers.push(Number(match[1]));
+    if (match[2]) subtitleNumbers.push(Number(match[2]));
   }
-  const firstCueNumber = Math.min(...cueNumbers.filter(Number.isInteger));
-  const segment = state.segments[firstCueNumber - 1];
+  const firstSubtitleNumber = Math.min(...subtitleNumbers.filter(Number.isInteger));
+  const segment = state.segments[firstSubtitleNumber - 1];
   if (!segment) return;
   selectSegment(segment.id, false);
   scrollSegmentListToCenter(segment.id);
@@ -1221,7 +1228,7 @@ async function approveAndRender() {
     if (state.project?.id === projectId) {
       renderProject();
       renderProviderControl();
-      focusFirstInvalidCueFromError(error.message);
+      focusFirstInvalidSegmentFromError(error.message);
     }
     showToast(error.message);
   }
@@ -1563,7 +1570,7 @@ function exactPreviewCacheKey(segment) {
     style: state.project.subtitle_style,
     segmentId: segment.id,
     sourceText: segment.source_text,
-    translatedText: segment.translated_text,
+    translatedText: segment.target_text,
   });
 }
 
@@ -1836,9 +1843,18 @@ async function performSaveSubtitleStyle({ renderPreview = true } = {}) {
 
 async function refreshCurrentProject() {
   if (!state.project) return;
+  const projectId = state.project.id;
   const previousCount = state.project.segment_count;
   const previousRevision = state.project.subtitle_revision;
-  state.project = await api(`/api/projects/${state.project.id}`);
+  let project;
+  try {
+    project = await api(`/api/projects/${projectId}`);
+  } catch (error) {
+    if (reloadAfterMissingProject(error)) return;
+    throw error;
+  }
+  if (state.project?.id !== projectId) return;
+  state.project = project;
   renderProject();
   renderProviderControl();
   await loadProjects();
@@ -1849,15 +1865,31 @@ async function refreshCurrentProject() {
   syncPolling();
 }
 
+function reloadAfterMissingProject(error) {
+  if (error.status !== 404) return false;
+  // The server may have restarted with a fresh database while this tab stayed open.
+  if (state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer = null;
+  window.location.reload();
+  return true;
+}
+
 function syncPolling() {
   const shouldPoll = state.project && ["queued", "running"].includes(state.project.status);
   if (!shouldPoll && state.pollTimer) {
     clearInterval(state.pollTimer);
     state.pollTimer = null;
   } else if (shouldPoll && !state.pollTimer) {
-    state.pollTimer = setInterval(refreshCurrentProject, 2000);
+    state.pollTimer = setInterval(() => {
+      void refreshCurrentProject().catch((error) => console.warn("Project refresh failed:", error));
+    }, 2000);
   }
 }
+
+window.addEventListener("focus", () => {
+  const refresh = state.project ? refreshCurrentProject() : loadProjects();
+  void refresh.catch((error) => console.warn("Project refresh failed:", error));
+});
 
 function openCreateDialog() {
   $("#form-error").classList.add("hidden");
@@ -1927,15 +1959,15 @@ $("#add-context-term").addEventListener("click", () => {
     return;
   }
   container.querySelector(".context-empty")?.remove();
-  const row = createGlobalContextTermRow();
+  const row = createTranslationContextTermRow();
   container.append(row);
   row.querySelector(".context-term-source").focus();
-  setGlobalContextDirty();
+  setTranslationContextDirty();
 });
-$("#context-overview").addEventListener("input", setGlobalContextDirty);
-$("#context-style").addEventListener("input", setGlobalContextDirty);
-$("#save-context-draft").addEventListener("click", () => void saveGlobalContext());
-$("#approve-context").addEventListener("click", () => void saveGlobalContext({ approve: true }));
+$("#context-overview").addEventListener("input", setTranslationContextDirty);
+$("#context-style").addEventListener("input", setTranslationContextDirty);
+$("#save-context-draft").addEventListener("click", () => void saveTranslationContext());
+$("#approve-context").addEventListener("click", () => void saveTranslationContext({ approve: true }));
 ensureExactPreviewButton()?.addEventListener("click", () => void toggleExactPreview());
 $("#subtitle-style-button").addEventListener("click", () => void openSubtitleStylePanel());
 $("#close-subtitle-style").addEventListener("click", () => void closeSubtitleStylePanel());

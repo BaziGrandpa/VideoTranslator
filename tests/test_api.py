@@ -29,18 +29,18 @@ def test_create_project_and_edit_segment(tmp_path: Path, monkeypatch) -> None:
                 "start_ms": 1000,
                 "end_ms": 2000,
                 "source_text": "Hello",
-                "translated_text": "Hello translated",
+                "target_text": "Hello translated",
             }
         ],
     )
     segment = repository.list_segments(project_id)[0]
     edited = client.patch(
         f"/api/projects/{project_id}/segments/{segment['id']}",
-        json={"start_ms": 1100, "translated_text": "Edited translation"},
+        json={"start_ms": 1100, "target_text": "Edited translation"},
     )
     assert edited.status_code == 200
     assert edited.json()["start_ms"] == 1100
-    assert edited.json()["translated_text"] == "Edited translation"
+    assert edited.json()["target_text"] == "Edited translation"
 
 
 def test_timing_updates_share_neighbor_boundaries_and_reject_zero_duration(
@@ -55,13 +55,13 @@ def test_timing_updates_share_neighbor_boundaries_and_reject_zero_duration(
     repository.replace_segments(
         project["id"],
         [
-            {"start_ms": 1000, "end_ms": 2000, "source_text": "One", "translated_text": "一"},
-            {"start_ms": 2000, "end_ms": 3000, "source_text": "Two", "translated_text": "二"},
+            {"start_ms": 1000, "end_ms": 2000, "source_text": "One", "target_text": "一"},
+            {"start_ms": 2000, "end_ms": 3000, "source_text": "Two", "target_text": "二"},
             {
                 "start_ms": 3000,
                 "end_ms": 4000,
                 "source_text": "Three",
-                "translated_text": "三",
+                "target_text": "三",
             },
         ],
     )
@@ -183,24 +183,24 @@ def test_delete_project_removes_database_and_both_file_trees(tmp_path: Path, mon
     repository.claim_next_job()
     repository.complete_job(job["id"])
     repository.update_project(project["id"], status="waiting_review", stage="waiting_review")
-    repository.replace_timed_tokens(
+    repository.replace_tokens(
         project["id"], [{"text": "Hello", "start_ms": 0, "end_ms": 1000}]
     )
     repository.initialize_subtitle_plan(
         project["id"],
         [{"start_token_id": 0, "end_token_id": 0, "start_ms": 0, "end_ms": 1000}],
     )
-    part_id = repository.list_subtitle_parts(project["id"])[0]["id"]
-    repository.replace_source_sentences(
+    part_id = repository.list_parts(project["id"])[0]["id"]
+    repository.replace_cues(
         project["id"],
         part_id,
         [{
-            "source_sentence_id": 1,
+            "cue_id": 1,
             "start_token_id": 0,
             "end_token_id": 0,
             "start_ms": 0,
             "end_ms": 1000,
-            "source_sentence": "Hello",
+            "source_text": "Hello",
         }],
     )
     repository.begin_part_punctuation(project["id"], part_id, "fingerprint", "codex")
@@ -234,12 +234,13 @@ def test_delete_project_removes_database_and_both_file_trees(tmp_path: Path, mon
             "SELECT COUNT(*) FROM projects WHERE id = ?", (project["id"],)
         ).fetchone()[0] == 0
         for table in (
-            "jobs", "timed_tokens", "subtitle_parts", "source_sentences",
-            "part_punctuation", "segments",
+            "jobs", "tokens", "parts", "cues", "segments",
         ):
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE project_id = ?", (project["id"],)
             ).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM part_punctuation").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM punctuation_marks").fetchone()[0] == 0
 
 
 def test_delete_project_rejects_queued_and_running_jobs(tmp_path: Path, monkeypatch) -> None:
@@ -329,11 +330,11 @@ def test_rebuild_clears_old_subtitle_state_before_queueing(tmp_path: Path, monke
         progress=95,
         video_path=str(video_path),
         output_path=str(tmp_path / "old-output.mp4"),
-        global_translation_context={"overview": "Old", "style": "Old", "terms": []},
-        global_context_provider="codex",
-        global_context_approved=1,
+        translation_context={"overview": "Old", "style": "Old", "terms": []},
+        context_provider="codex",
+        context_approved=1,
     )
-    repository.replace_timed_tokens(
+    repository.replace_tokens(
         project["id"],
         [{"text": "Hello", "start_ms": 0, "end_ms": 1000, "source": "caption"}],
     )
@@ -348,7 +349,7 @@ def test_rebuild_clears_old_subtitle_state_before_queueing(tmp_path: Path, monke
             }
         ],
     )
-    part = repository.list_subtitle_parts(project["id"])[0]
+    part = repository.list_parts(project["id"])[0]
     repository.replace_part_segments(
         project["id"],
         part["id"],
@@ -359,7 +360,7 @@ def test_rebuild_clears_old_subtitle_state_before_queueing(tmp_path: Path, monke
                 "start_token_id": 0,
                 "end_token_id": 0,
                 "source_text": "Hello",
-                "translated_text": "你好",
+                "target_text": "你好",
             }
         ],
     )
@@ -369,15 +370,15 @@ def test_rebuild_clears_old_subtitle_state_before_queueing(tmp_path: Path, monke
     assert response.json()["kind"] == "rebuild_subtitles"
     assert response.json()["status"] == "queued"
     assert repository.list_segments(project["id"]) == []
-    assert repository.list_timed_tokens(project["id"]) == []
-    assert repository.list_subtitle_parts(project["id"]) == []
+    assert repository.list_tokens(project["id"]) == []
+    assert repository.list_parts(project["id"]) == []
     rebuilt = repository.get_project(project["id"])
     assert rebuilt is not None
     assert rebuilt["status"] == "queued"
     assert rebuilt["stage"] == "queued"
     assert rebuilt["progress"] == 0
-    assert rebuilt["global_translation_context"] is None
-    assert rebuilt["global_context_approved"] is False
+    assert rebuilt["translation_context"] is None
+    assert rebuilt["context_approved"] is False
     assert rebuilt["output_path"] is None
     assert rebuilt["video_path"] == str(video_path)
 
@@ -395,9 +396,9 @@ def test_full_rebuild_can_preserve_existing_pass0_context(tmp_path: Path, monkey
     repository.update_project(
         project["id"],
         video_path=str(video),
-        global_translation_context=context,
-        global_context_provider="codex",
-        global_context_approved=1,
+        translation_context=context,
+        context_provider="codex",
+        context_approved=1,
         status="waiting_review",
     )
 
@@ -413,9 +414,9 @@ def test_full_rebuild_can_preserve_existing_pass0_context(tmp_path: Path, monkey
     assert response.status_code == 200
     assert response.json()["kind"] == "rebuild_subtitles_skip_pass0"
     rebuilt = repository.get_project(project["id"])
-    assert rebuilt["global_translation_context"] == context
-    assert rebuilt["global_context_provider"] == "codex"
-    assert rebuilt["global_context_approved"] is True
+    assert rebuilt["translation_context"] == context
+    assert rebuilt["context_provider"] == "codex"
+    assert rebuilt["context_approved"] is True
 
 
 def test_full_rebuild_rejects_skip_pass0_without_existing_context(
@@ -457,12 +458,12 @@ def test_selected_part_rebuild_keeps_pass0_and_visible_cues(
     repository.update_project(
         project["id"],
         video_path=str(video),
-        global_translation_context=context,
-        global_context_provider="codex",
-        global_context_approved=1,
+        translation_context=context,
+        context_provider="codex",
+        context_approved=1,
         status="waiting_review",
     )
-    repository.replace_timed_tokens(
+    repository.replace_tokens(
         project["id"],
         [{"text": "Hello.", "start_ms": 0, "end_ms": 1000, "source": "test"}],
     )
@@ -470,19 +471,19 @@ def test_selected_part_rebuild_keeps_pass0_and_visible_cues(
         project["id"],
         [{"start_token_id": 0, "end_token_id": 0, "start_ms": 0, "end_ms": 1000}],
     )
-    part = repository.list_subtitle_parts(project["id"])[0]
-    repository.replace_source_sentences(
+    part = repository.list_parts(project["id"])[0]
+    repository.replace_cues(
         project["id"],
         part["id"],
         [
             {
-                "source_sentence_id": 1,
+                "cue_id": 1,
                 "start_token_id": 0,
                 "end_token_id": 0,
                 "start_ms": 0,
                 "end_ms": 1000,
-                "source_sentence": "Hello.",
-                "chinese_sentence": "你好。",
+                "source_text": "Hello.",
+                "target_text": "你好。",
             }
         ],
     )
@@ -495,10 +496,10 @@ def test_selected_part_rebuild_keeps_pass0_and_visible_cues(
                 "end_ms": 1000,
                 "start_token_id": 0,
                 "end_token_id": 0,
-                "source_sentence_id": 1,
-                "sub_id": 0,
+                "cue_id": 1,
+                "subcue_id": 0,
                 "source_text": "Hello.",
-                "translated_text": "你好。",
+                "target_text": "你好。",
             }
         ],
     )
@@ -511,13 +512,13 @@ def test_selected_part_rebuild_keeps_pass0_and_visible_cues(
     assert response.status_code == 200
     assert response.json()["kind"] == "part_rebuild"
     rebuilt = repository.get_project(project["id"])
-    assert rebuilt["global_translation_context"] == context
-    assert rebuilt["global_context_approved"] is True
+    assert rebuilt["translation_context"] == context
+    assert rebuilt["context_approved"] is True
     assert rebuilt["pending_rebuild_scope"]["parts"][0]["part_id"] == part["id"]
-    assert repository.list_segments(project["id"])[0]["translated_text"] == "你好。"
+    assert repository.list_segments(project["id"])[0]["target_text"] == "你好。"
 
 
-def test_review_issues_are_live_cue_problems_without_severity(
+def test_review_issues_are_live_segment_problems_without_severity(
     tmp_path: Path, monkeypatch
 ) -> None:
     database = tmp_path / "api.db"
@@ -536,7 +537,7 @@ def test_review_issues_are_live_cue_problems_without_severity(
             }
         ],
     )
-    part = repository.list_subtitle_parts(project["id"])[0]
+    part = repository.list_parts(project["id"])[0]
     repository.replace_part_segments(
         project["id"],
         part["id"],
@@ -547,7 +548,7 @@ def test_review_issues_are_live_cue_problems_without_severity(
                 "start_token_id": 0,
                 "end_token_id": 0,
                 "source_text": "I just did something crazy.",
-                "translated_text": "我刚做了一件疯狂的事",
+                "target_text": "我刚做了一件疯狂的事",
             },
             {
                 "start_ms": 7000,
@@ -555,7 +556,7 @@ def test_review_issues_are_live_cue_problems_without_severity(
                 "start_token_id": 1,
                 "end_token_id": 2,
                 "source_text": "Hello there.",
-                "translated_text": "你好",
+                "target_text": "你好",
                 "quality_flags": ["pass3_invalid_output"],
                 "status": "needs_review",
             },
@@ -590,7 +591,7 @@ def test_exact_preview_returns_ffmpeg_frame(tmp_path: Path, monkeypatch) -> None
                 "start_ms": 1000,
                 "end_ms": 2000,
                 "source_text": "Exact preview",
-                "translated_text": "精确预览",
+                "target_text": "精确预览",
             }
         ],
     )
@@ -637,7 +638,7 @@ def test_final_render_locks_project_edits_and_exact_preview(tmp_path: Path, monk
                 "start_ms": 1000,
                 "end_ms": 2000,
                 "source_text": "Locked",
-                "translated_text": "已锁定",
+                "target_text": "已锁定",
             }
         ],
     )
@@ -646,7 +647,7 @@ def test_final_render_locks_project_edits_and_exact_preview(tmp_path: Path, monk
 
     edit = client.patch(
         f"/api/projects/{project['id']}/segments/{segment['id']}",
-        json={"translated_text": "Should not save"},
+        json={"target_text": "Should not save"},
     )
     style = client.patch(
         f"/api/projects/{project['id']}/subtitle-style",
@@ -714,13 +715,13 @@ def test_pass0_context_can_be_edited_and_approved_before_translation(
         status="waiting_context_review",
         stage="waiting_context_review",
         progress=68,
-        global_translation_context={
+        translation_context={
             "overview": "Initial overview",
             "style": "Initial style",
             "terms": [],
         },
-        global_context_provider="codex",
-        global_context_approved=0,
+        context_provider="codex",
+        context_approved=0,
     )
     payload = {
         "overview": "  A revised project overview.  ",
@@ -736,17 +737,17 @@ def test_pass0_context_can_be_edited_and_approved_before_translation(
     }
 
     saved = client.patch(
-        f"/api/projects/{project['id']}/global-translation-context", json=payload
+        f"/api/projects/{project['id']}/translation-context", json=payload
     )
 
     assert saved.status_code == 200
     assert saved.json()["overview"] == "A revised project overview."
     draft_project = repository.get_project(project["id"])
     assert draft_project["status"] == "waiting_context_review"
-    assert draft_project["global_context_approved"] is False
+    assert draft_project["context_approved"] is False
 
     approved = client.post(
-        f"/api/projects/{project['id']}/global-translation-context/approve", json=payload
+        f"/api/projects/{project['id']}/translation-context/approve", json=payload
     )
 
     assert approved.status_code == 200
@@ -754,8 +755,8 @@ def test_pass0_context_can_be_edited_and_approved_before_translation(
     approved_project = repository.get_project(project["id"])
     assert approved_project["status"] == "queued"
     assert approved_project["stage"] == "queued"
-    assert approved_project["global_context_approved"] is True
-    assert approved_project["global_translation_context"]["terms"][0] == {
+    assert approved_project["context_approved"] is True
+    assert approved_project["translation_context"]["terms"][0] == {
         "source": "Katie",
         "target": "凯蒂",
         "category": "person",
@@ -775,11 +776,11 @@ def test_pass0_context_rejects_duplicate_source_terms(tmp_path: Path, monkeypatc
         project["id"],
         status="waiting_context_review",
         stage="waiting_context_review",
-        global_translation_context={"overview": "Overview", "style": "", "terms": []},
+        translation_context={"overview": "Overview", "style": "", "terms": []},
     )
 
     response = client.patch(
-        f"/api/projects/{project['id']}/global-translation-context",
+        f"/api/projects/{project['id']}/translation-context",
         json={
             "overview": "Overview",
             "style": "",
@@ -811,7 +812,7 @@ def test_retry_after_translation_failure_does_not_redownload(tmp_path: Path, mon
                 "start_ms": 0,
                 "end_ms": 1000,
                 "source_text": "Keep this transcript",
-                "translated_text": "",
+                "target_text": "",
             }
         ],
     )

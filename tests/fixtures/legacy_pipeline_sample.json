@@ -1,0 +1,431 @@
+{
+  "origin": "Existing local project, read-only extract before naming refactor",
+  "token_range": [
+    17,
+    50
+  ],
+  "tokens": [
+    {
+      "sequence": 17,
+      "raw_text": "but",
+      "normalized_text": "but",
+      "start_ms": 5640,
+      "end_ms": 6400,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 18,
+      "raw_text": "let's",
+      "normalized_text": "let's",
+      "start_ms": 6400,
+      "end_ms": 7000,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 19,
+      "raw_text": "translate",
+      "normalized_text": "translate",
+      "start_ms": 7000,
+      "end_ms": 7640,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 20,
+      "raw_text": "that",
+      "normalized_text": "that",
+      "start_ms": 7640,
+      "end_ms": 8000,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 21,
+      "raw_text": "to",
+      "normalized_text": "to",
+      "start_ms": 8000,
+      "end_ms": 8510,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 22,
+      "raw_text": "modern",
+      "normalized_text": "modern",
+      "start_ms": 8520,
+      "end_ms": 9120,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 1
+    },
+    {
+      "sequence": 23,
+      "raw_text": "scientific",
+      "normalized_text": "scientific",
+      "start_ms": 9120,
+      "end_ms": 9760,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 24,
+      "raw_text": "speech.",
+      "normalized_text": "speech.",
+      "start_ms": 9760,
+      "end_ms": 10870,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 25,
+      "raw_text": "Eyes",
+      "normalized_text": "Eyes",
+      "start_ms": 10880,
+      "end_ms": 11200,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 1
+    },
+    {
+      "sequence": 26,
+      "raw_text": "are",
+      "normalized_text": "are",
+      "start_ms": 11200,
+      "end_ms": 11320,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 27,
+      "raw_text": "window",
+      "normalized_text": "window",
+      "start_ms": 11320,
+      "end_ms": 11720,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 28,
+      "raw_text": "to",
+      "normalized_text": "to",
+      "start_ms": 11720,
+      "end_ms": 11920,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 29,
+      "raw_text": "your",
+      "normalized_text": "your",
+      "start_ms": 11920,
+      "end_ms": 12080,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 30,
+      "raw_text": "subconscious",
+      "normalized_text": "subconscious",
+      "start_ms": 12080,
+      "end_ms": 12790,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 31,
+      "raw_text": "mind",
+      "normalized_text": "mind",
+      "start_ms": 12800,
+      "end_ms": 13600,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 1
+    },
+    {
+      "sequence": 32,
+      "raw_text": "and",
+      "normalized_text": "and",
+      "start_ms": 13600,
+      "end_ms": 13920,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 33,
+      "raw_text": "eyes",
+      "normalized_text": "eyes",
+      "start_ms": 13920,
+      "end_ms": 14240,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 34,
+      "raw_text": "are",
+      "normalized_text": "are",
+      "start_ms": 14240,
+      "end_ms": 14360,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 35,
+      "raw_text": "window",
+      "normalized_text": "window",
+      "start_ms": 14360,
+      "end_ms": 14760,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 36,
+      "raw_text": "to",
+      "normalized_text": "to",
+      "start_ms": 14760,
+      "end_ms": 14960,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 37,
+      "raw_text": "your",
+      "normalized_text": "your",
+      "start_ms": 14960,
+      "end_ms": 15240,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 38,
+      "raw_text": "nervous",
+      "normalized_text": "nervous",
+      "start_ms": 15240,
+      "end_ms": 15670,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 39,
+      "raw_text": "system.",
+      "normalized_text": "system.",
+      "start_ms": 15680,
+      "end_ms": 17430,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 1
+    },
+    {
+      "sequence": 40,
+      "raw_text": "As",
+      "normalized_text": "As",
+      "start_ms": 17440,
+      "end_ms": 17680,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 1
+    },
+    {
+      "sequence": 41,
+      "raw_text": "long",
+      "normalized_text": "long",
+      "start_ms": 17680,
+      "end_ms": 18320,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 42,
+      "raw_text": "as",
+      "normalized_text": "as",
+      "start_ms": 18320,
+      "end_ms": 18520,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 43,
+      "raw_text": "you",
+      "normalized_text": "you",
+      "start_ms": 18520,
+      "end_ms": 18680,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 44,
+      "raw_text": "do",
+      "normalized_text": "do",
+      "start_ms": 18680,
+      "end_ms": 18920,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 45,
+      "raw_text": "something",
+      "normalized_text": "something",
+      "start_ms": 18920,
+      "end_ms": 19400,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 46,
+      "raw_text": "that",
+      "normalized_text": "that",
+      "start_ms": 19400,
+      "end_ms": 19560,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 47,
+      "raw_text": "goes",
+      "normalized_text": "goes",
+      "start_ms": 19560,
+      "end_ms": 19870,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 48,
+      "raw_text": "against",
+      "normalized_text": "against",
+      "start_ms": 19880,
+      "end_ms": 20280,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 1
+    },
+    {
+      "sequence": 49,
+      "raw_text": "your",
+      "normalized_text": "your",
+      "start_ms": 20280,
+      "end_ms": 20440,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    },
+    {
+      "sequence": 50,
+      "raw_text": "integrity,",
+      "normalized_text": "integrity,",
+      "start_ms": 20440,
+      "end_ms": 21320,
+      "source": "youtube_auto",
+      "confidence": null,
+      "timing_inferred": 0
+    }
+  ],
+  "cues": [
+    {
+      "source_sentence_id": 3,
+      "start_token_id": 17,
+      "end_token_id": 24,
+      "start_ms": 5640,
+      "end_ms": 10870,
+      "source_sentence": "but let's translate that to modern scientific speech.",
+      "chinese_sentence": "但我们可以换一种现代科学的说法：",
+      "hidden_token_ids": []
+    },
+    {
+      "source_sentence_id": 4,
+      "start_token_id": 25,
+      "end_token_id": 39,
+      "start_ms": 10880,
+      "end_ms": 17430,
+      "source_sentence": "Eyes are window to your subconscious mind and eyes are window to your nervous system.",
+      "chinese_sentence": "眼睛是通往潜意识的窗户，也是反映神经系统状态的窗户。",
+      "hidden_token_ids": []
+    },
+    {
+      "source_sentence_id": 5,
+      "start_token_id": 40,
+      "end_token_id": 50,
+      "start_ms": 17440,
+      "end_ms": 21320,
+      "source_sentence": "As long as you do something that goes against your integrity,",
+      "chinese_sentence": "只要你做的事违背了自己想坚持的原则，",
+      "hidden_token_ids": []
+    }
+  ],
+  "segments": [
+    {
+      "start_token_id": 17,
+      "end_token_id": 24,
+      "start_ms": 5640,
+      "end_ms": 10870,
+      "source_text": "but let's translate that to modern scientific speech.",
+      "translated_text": "但我们可以换一种现代科学的说法：",
+      "source_sentence_id": 3,
+      "sub_id": 0,
+      "quality_flags": []
+    },
+    {
+      "start_token_id": 25,
+      "end_token_id": 31,
+      "start_ms": 10880,
+      "end_ms": 13600,
+      "source_text": "Eyes are window to your subconscious mind",
+      "translated_text": "眼睛是通往潜意识的窗户，",
+      "source_sentence_id": 4,
+      "sub_id": 1,
+      "quality_flags": []
+    },
+    {
+      "start_token_id": 32,
+      "end_token_id": 39,
+      "start_ms": 13600,
+      "end_ms": 17430,
+      "source_text": "and eyes are window to your nervous system.",
+      "translated_text": "也是反映神经系统状态的窗户。",
+      "source_sentence_id": 4,
+      "sub_id": 2,
+      "quality_flags": []
+    },
+    {
+      "start_token_id": 40,
+      "end_token_id": 50,
+      "start_ms": 17440,
+      "end_ms": 21320,
+      "source_text": "As long as you do something that goes against your integrity,",
+      "translated_text": "只要你做的事违背了自己想坚持的原则，",
+      "source_sentence_id": 5,
+      "sub_id": 0,
+      "quality_flags": []
+    }
+  ],
+  "pass1": {
+    "source_text": "You heard about that saying that eyes are window to your soul. That is true in essence, but let's translate that to modern scientific speech. Eyes are window to your subconscious mind and eyes are window to your nervous system. As long as you do something that goes against your integrity, let's say you are you want to do nofap and you keep relapsing, you're in that cycle of relapsing and trying and relapsing and trying. As long as you are in that loop, you're always going to have that that look in your eyes, that vacant look because you know what you need to do and you are 100% sure that is what you want to become. You want to become a guy that doesn't watch porn, that doesn't have any kind of addictions, but you still keep doing them. You still keep failing and being addicted to so many things, going against your own values, against your integrity. And that's all is going to show off in your eyes. Because you are lying to yourself. You're not being truthful. You can't have that piercing look as you're supposed to have as a man with high testosterone is always supposed to have piercing look, intense look in his eyes, focused look. You can't have that if your nervous system is fried by watching all those things that you are not supposed to be watching, by doing all those activities, addictions which fry your dopamine system. It causes damage on multiple pathways which all show in your eyes. It fries your dopamine system, it fries your nervous system and every time you fry your nervous system, you are constantly triggering that fight or flight response. It shows off in your eyes. You can't have clear look in your eyes if your nervous system is constantly in fight or flight, in sympathetic system. And only way to fix this to change the look you have in your eyes is to stop lying to yourself. Become a guy that says something you're going to do and you do that. And to fix your narrow system, constantly work on putting yourself into parasympathetic system. You need to reduce that constant stimulation throughout the day. You're stimulating your brain with caffeine, with sugar, with junk food, with uh constantly being on your phone, on your laptop all day. And of course you you stay in that sympathetic mode of narrow system and that affects your look, your eyes. And I think eyes are like 40 or 50% of your attractiveness. If you're always going to have that look in your eyes it's going to repel women. It's going to repel men. It's It's going to repel everyone around you. They don't want to be around you. It's all subconscious. They see that that something isn't right with you. And that repels them. And that's why you need to work on your narrow system. You need to change for a sympathetic to parasympathetic mode for most of your day. Of course you're going to be in sympathetic mode when you go running, when you go to the gym and all those activities which are good. But for majority of your day you should strive to be in parasympathetic mode. That's how your narrow system is going to recover. And that refreshed, recovered look is going to show off in your eyes along with your subconscious mind being in alignment with your conscious mind, which means you don't have cognitive dissonance. You don't have internal conflicts. You have integrity. And that means thinking, saying and doing same things always. That's it for this video. See you next one.",
+    "target_text": "你听过“眼睛是心灵的窗户”这句话吧？本质上确实如此，但我们可以换一种现代科学的说法：眼睛是通往潜意识的窗户，也是反映神经系统状态的窗户。\n\n只要你做的事违背了自己想坚持的原则，比如你想践行 NoFap，却不断破戒，陷在破戒、再尝试、又破戒、又尝试的循环里，你的眼神就会一直显得空洞。因为你知道自己该做什么，也百分之百确定自己想成为什么样的人。你想成为一个不看色情内容、没有任何成瘾行为的人，却还是不断重复这些行为。你一次次失败，对许多东西上瘾，违背自己的价值观，也做不到言行一致。这一切都会从你的眼神里显露出来。\n\n因为你在欺骗自己，没有诚实面对自己。你无法拥有那种锐利的眼神。按这种说法，一个睾酮水平高的男人，眼神本该锐利、炯炯有神，而且专注。可如果你一直看那些不该看的东西，又沉迷于各种让多巴胺系统不堪重负的活动，你的神经系统都被折腾坏了，就不可能有那样的眼神。这会影响多个通路，而这些影响都会表现在你的眼神里。它让多巴胺系统和神经系统不堪重负。每当神经系统受到这样的刺激，你就会不断触发战斗或逃跑反应，这也会表现在眼神里。如果你的神经系统一直处于战斗或逃跑状态，处于交感神经系统主导的状态，你的眼神就不可能清澈。\n\n要改变眼神，唯一的办法就是停止欺骗自己。做一个说到做到的人。要让神经系统恢复，你还得不断练习，让自己进入副交感神经系统主导的状态。你需要减少一整天持续不断的刺激。咖啡因、糖、垃圾食品，还有整天盯着手机和笔记本电脑，都在刺激你的大脑。这样一来，你当然会一直处于交感神经系统主导的状态，而这会影响你的神情和眼神。\n\n我觉得，眼睛大概占一个人吸引力的40%或50%。如果你总是那种眼神，女人会被你劝退，男人也会被你劝退，身边所有人都会想离你远一点。他们不想待在你身边。这都是潜意识里的反应。他们看得出你有些不对劲，于是就会被你劝退。所以你需要调整自己的神经系统，让一天中的大部分时间，从交感神经系统主导，转为副交感神经系统主导。当然，跑步、去健身房，以及做其他有益的活动时，你会处于交感神经系统主导的状态。但在一天中的大部分时间里，你应该努力保持副交感神经系统主导的状态。这样神经系统才能恢复。\n\n恢复之后，那种精神焕发的感觉会从眼神里显露出来。同时，你的潜意识也会和意识保持一致。这意味着你没有认知失调，没有内心冲突，做到了言行一致。也就是始终想的、说的和做的都一样。这期视频就到这里，下期见。"
+  }
+}

@@ -70,7 +70,7 @@ def transcribe_tokens(video_path: Path) -> list[dict[str, Any]]:
                 }
             ]
             for token in tokens_from_segments(fallback_segments, source="whisperx_segment"):
-                token["sequence"] = len(aligned_tokens)
+                token["token_id"] = len(aligned_tokens)
                 aligned_tokens.append(token)
             continue
         for word in words:
@@ -79,7 +79,7 @@ def transcribe_tokens(video_path: Path) -> list[dict[str, Any]]:
                 continue
             aligned_tokens.append(
                 {
-                    "sequence": len(aligned_tokens),
+                    "token_id": len(aligned_tokens),
                     "text": text,
                     "raw_text": text,
                     "normalized_text": text,

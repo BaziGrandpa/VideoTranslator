@@ -4,7 +4,7 @@ import hashlib
 import json
 from typing import Any
 
-from app.services.source_sentences import classify_token_kinds
+from app.services.cues import classify_token_kinds
 
 PUNCTUATION_MARKS = frozenset({",", ".", "?", "!", ":", ";"})
 SENTENCE_END_MARKS = frozenset({".", "?", "!"})
@@ -14,7 +14,7 @@ PROMPT_VERSION = "punctuation-v2"
 def source_fingerprint(tokens: list[dict[str, Any]]) -> str:
     source = [
         [
-            int(token["sequence"]),
+            int(token["token_id"]),
             str(token.get("raw_text", token["normalized_text"])),
             str(token["normalized_text"]),
             int(token["start_ms"]),
@@ -44,7 +44,7 @@ def validate_punctuation_annotations(
         raise TypeError("punctuation must be an array")
     kinds = classify_token_kinds(tokens)
     speech_ids = {
-        int(token["sequence"])
+        int(token["token_id"])
         for token, kind in zip(tokens, kinds, strict=True)
         if kind == "speech"
     }
@@ -77,6 +77,6 @@ def apply_punctuation(
 ) -> list[dict[str, Any]]:
     by_id = {int(row["after_token_id"]): str(row["mark"]) for row in marks}
     return [
-        {**token, "text": str(token["normalized_text"]) + by_id.get(int(token["sequence"]), "")}
+        {**token, "text": str(token["normalized_text"]) + by_id.get(int(token["token_id"]), "")}
         for token in tokens
     ]

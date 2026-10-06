@@ -2,31 +2,31 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
-    "sentences": {
+    "cues": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
-          "source_sentence_id": { "type": "integer" },
-          "subsentences": {
+          "cue_id": { "type": "integer" },
+          "subcues": {
             "type": "array",
             "minItems": 1,
             "items": {
               "type": "object",
               "properties": {
                 "end_token_id": { "type": "integer" },
-                "chinese_sentence": { "type": "string" }
+                "target_text": { "type": "string" }
               },
-              "required": ["end_token_id", "chinese_sentence"],
+              "required": ["end_token_id", "target_text"],
               "additionalProperties": false
             }
           }
         },
-        "required": ["source_sentence_id", "subsentences"],
+        "required": ["cue_id", "subcues"],
         "additionalProperties": false
       }
     }
   },
-  "required": ["sentences"],
+  "required": ["cues"],
   "additionalProperties": false
 }

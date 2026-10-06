@@ -1,5 +1,9 @@
 # Subtitle quality acceptance: September 16, 2026
 
+Historical snapshot of the pre-Token/Part/Cue/Sub-cue/Segment pipeline. Terms such as
+"window" and "cue" below describe the system and saved outputs at that date; this
+document is not the current schema or workflow specification.
+
 Project: `c6220602-8850-4141-948d-cd7dfbeb226f`
 
 Video: I Doubled My Dopamine Everyday For 7 Days (45:15)

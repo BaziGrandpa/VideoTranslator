@@ -11,7 +11,7 @@ def test_grok_reads_structured_output(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(translator, "settings", replace(translator.settings, data_dir=tmp_path))
     schema_path = tmp_path / "schema.json"
     schema_path.write_text("{}", encoding="utf-8")
-    output = {"structuredOutput": {"sentences": [{"source_sentence_id": 1, "chinese_sentence": "你好"}]}}
+    output = {"structuredOutput": {"cues": [{"cue_id": 1, "target_text": "你好"}]}}
     completed = subprocess.CompletedProcess([], 0, json.dumps(output), "")
     monkeypatch.setattr(translator, "_run_command", lambda *args, **kwargs: completed)
 
@@ -48,7 +48,7 @@ def test_cli_call_label_names_the_pass() -> None:
     ) == "Pass 0 via grok (cli-default)"
     assert translator.format_cli_call(
         "codex",
-        stage="reference-translation",
+        stage="part-translation",
         part=[1, 2],
         requested_model="gpt-5.6-terra",
         reasoning_effort="high",

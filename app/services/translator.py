@@ -19,8 +19,8 @@ _cli_call_label: ContextVar[str] = ContextVar("cli_call_label", default="CLI cal
 _STAGE_NAMES = {
     "punctuation-restoration": "Punctuation Pass",
     "context": "Pass 0",
-    "reference-translation": "Pass 1",
-    "part-sentence-alignment": "Pass 2",
+    "part-translation": "Pass 1",
+    "part-cue-alignment": "Pass 2",
     "pass3-1-boundary-assignment": "Pass 3-1",
     "pass3-2-chinese-splitting": "Pass 3-2",
 }

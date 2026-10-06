@@ -17,19 +17,19 @@ def sample_segments() -> list[dict]:
             "start_ms": 0,
             "end_ms": 1000,
             "source_text": "One.",
-            "translated_text": "Translated one.",
+            "target_text": "Translated one.",
         },
         {
             "start_ms": 1100,
             "end_ms": 2100,
             "source_text": "Two.",
-            "translated_text": "Translated two.",
+            "target_text": "Translated two.",
         },
         {
             "start_ms": 2200,
             "end_ms": 3200,
             "source_text": "Three.",
-            "translated_text": "Translated three.",
+            "target_text": "Translated three.",
         },
     ]
 
@@ -55,21 +55,21 @@ def test_segment_edit_split_and_merge(tmp_path: Path) -> None:
     segments = repository.list_segments(project["id"])
 
     updated = repository.update_segment(
-        project["id"], segments[0]["id"], translated_text="Edited first.", status="edited"
+        project["id"], segments[0]["id"], target_text="Edited first.", status="edited"
     )
-    assert updated["translated_text"] == "Edited first."
+    assert updated["target_text"] == "Edited first."
 
     repository.split_segment(project["id"], segments[0]["id"], 500)
     split = repository.list_segments(project["id"])
     assert len(split) == 4
-    assert [item["sequence"] for item in split] == [0, 1, 2, 3]
+    assert [item["segment_order"] for item in split] == [1, 2, 3, 4]
     assert split[0]["end_ms"] == 500
     assert split[1]["start_ms"] == 500
 
     repository.merge_with_next(project["id"], split[0]["id"])
     merged = repository.list_segments(project["id"])
     assert len(merged) == 3
-    assert [item["sequence"] for item in merged] == [0, 1, 2]
+    assert [item["segment_order"] for item in merged] == [1, 2, 3]
     assert merged[0]["end_ms"] == 1000
 
 
@@ -80,19 +80,19 @@ def test_chinese_terminal_punctuation_survives_segment_storage_and_edit(tmp_path
         project["id"],
         [{
             "start_ms": 0, "end_ms": 1000,
-            "source_text": "Look at you.", "translated_text": "看你。",
+            "source_text": "Look at you.", "target_text": "看你。",
         }],
     )
 
     segment = repository.list_segments(project["id"])[0]
-    assert segment["translated_text"] == "看你。"
+    assert segment["target_text"] == "看你。"
     edited = repository.update_segment(
-        project["id"], segment["id"], translated_text="看你，", status="edited"
+        project["id"], segment["id"], target_text="看你，", status="edited"
     )
-    assert edited["translated_text"] == "看你，"
+    assert edited["target_text"] == "看你，"
 
 
-def test_manual_merge_keeps_first_source_id_and_extends_token_range(tmp_path: Path) -> None:
+def test_manual_merge_extends_token_range(tmp_path: Path) -> None:
     repository = make_repository(tmp_path)
     project = repository.create_project("https://youtu.be/example")
     repository.replace_segments(
@@ -103,9 +103,8 @@ def test_manual_merge_keeps_first_source_id_and_extends_token_range(tmp_path: Pa
                 "end_ms": (index + 1) * 1000,
                 "start_token_id": index * 2,
                 "end_token_id": index * 2 + 1,
-                "source_sentence_id": index + 6,
                 "source_text": f"Cue {index + 6}",
-                "translated_text": chinese,
+                "target_text": chinese,
             }
             for index, chinese in enumerate(["前文", "看你。", "后文"])
         ],
@@ -115,50 +114,58 @@ def test_manual_merge_keeps_first_source_id_and_extends_token_range(tmp_path: Pa
     repository.merge_with_next(project["id"], first["id"])
 
     merged = repository.list_segments(project["id"])
-    assert [row["source_sentence_id"] for row in merged] == [6, 8]
-    assert [row["sequence"] for row in merged] == [0, 1]
+    assert [row["segment_order"] for row in merged] == [1, 2]
     assert (merged[0]["start_token_id"], merged[0]["end_token_id"]) == (0, 3)
-    assert merged[0]["translated_text"] == "前文看你。"
+    assert merged[0]["target_text"] == "前文看你。"
 
 
-def test_persists_timed_tokens_and_segment_token_ranges(tmp_path: Path) -> None:
+def test_persists_tokens_and_segment_token_ranges(tmp_path: Path) -> None:
     repository = make_repository(tmp_path)
     project = repository.create_project("https://youtu.be/example")
-    repository.replace_timed_tokens(
+    repository.replace_tokens(
         project["id"],
         [
             {"text": "Hello", "start_ms": 100, "end_ms": 400, "source": "test"},
             {"text": "world.", "start_ms": 400, "end_ms": 900, "source": "test"},
         ],
     )
-    repository.replace_segments(
+    repository.initialize_subtitle_plan(
         project["id"],
+        [{"start_token_id": 0, "end_token_id": 1, "start_ms": 100, "end_ms": 900}],
+    )
+    part_id = repository.list_parts(project["id"])[0]["id"]
+    repository.replace_cues(project["id"], part_id, [{
+        "cue_id": 1, "start_token_id": 0, "end_token_id": 1,
+        "start_ms": 100, "end_ms": 900, "source_text": "Hello world.",
+        "target_text": "Translated greeting",
+    }])
+    repository.replace_part_segments(
+        project["id"],
+        part_id,
         [
             {
                 "start_ms": 100,
                 "end_ms": 900,
                 "start_token_id": 0,
                 "end_token_id": 1,
-                "source_sentence_id": 1,
-                "sub_id": 1,
+                "cue_id": 1,
                 "source_text": "Hello world.",
-                "translated_text": "Translated greeting",
+                "target_text": "Translated greeting",
                 "quality_flags": ["very_short_duration"],
             }
         ],
     )
 
-    tokens = repository.list_timed_tokens(project["id"])
+    tokens = repository.list_tokens(project["id"])
     segment = repository.list_segments(project["id"])[0]
     assert [token["text"] for token in tokens] == ["Hello", "world."]
     assert segment["start_token_id"] == 0
     assert segment["end_token_id"] == 1
-    assert segment["source_sentence_id"] == 1
-    assert segment["sub_id"] == 1
+    assert [(item["cue_id"], item["subcue_id"]) for item in segment["components"]] == [(1, None)]
     assert segment["quality_flags"] == ["very_short_duration"]
 
 
-def test_persists_source_sentence_map(tmp_path: Path) -> None:
+def test_persists_source_text_map(tmp_path: Path) -> None:
     repository = make_repository(tmp_path)
     project = repository.create_project("https://youtu.be/example")
     repository.initialize_subtitle_plan(
@@ -172,27 +179,27 @@ def test_persists_source_sentence_map(tmp_path: Path) -> None:
             }
         ],
     )
-    part = repository.list_subtitle_parts(project["id"])[0]
-    repository.replace_source_sentences(
+    part = repository.list_parts(project["id"])[0]
+    repository.replace_cues(
         project["id"],
         part["id"],
         [
             {
-                "source_sentence_id": 1,
+                "cue_id": 1,
                 "start_token_id": 0,
                 "end_token_id": 2,
                 "start_ms": 100,
                 "end_ms": 900,
-                "source_sentence": "Hello there.",
-                "chinese_sentence": "你好。",
+                "source_text": "Hello there.",
+                "target_text": "你好。",
                 "hidden_token_ids": [0],
             }
         ],
     )
 
-    sentences = repository.list_source_sentences(part["id"])
-    assert sentences[0]["source_sentence_id"] == 1
-    assert sentences[0]["chinese_sentence"] == "你好。"
+    sentences = repository.list_cues(part["id"])
+    assert sentences[0]["cue_id"] == 1
+    assert sentences[0]["target_text"] == "你好。"
     assert sentences[0]["hidden_token_ids"] == [0]
 
 
@@ -210,7 +217,7 @@ def test_replace_part_segments_keeps_token_ranges(tmp_path: Path) -> None:
             }
         ],
     )
-    part = repository.list_subtitle_parts(project["id"])[0]
+    part = repository.list_parts(project["id"])[0]
     repository.replace_part_segments(
         project["id"],
         part["id"],
@@ -221,7 +228,7 @@ def test_replace_part_segments_keeps_token_ranges(tmp_path: Path) -> None:
                 "start_token_id": 0,
                 "end_token_id": 2,
                 "source_text": "First",
-                "translated_text": "第一",
+                "target_text": "第一",
             },
             {
                 "start_ms": 3000,
@@ -229,7 +236,7 @@ def test_replace_part_segments_keeps_token_ranges(tmp_path: Path) -> None:
                 "start_token_id": 3,
                 "end_token_id": 6,
                 "source_text": "Cross boundary",
-                "translated_text": "跨窗口",
+                "target_text": "跨窗口",
             },
             {
                 "start_ms": 7000,
@@ -237,7 +244,7 @@ def test_replace_part_segments_keeps_token_ranges(tmp_path: Path) -> None:
                 "start_token_id": 7,
                 "end_token_id": 9,
                 "source_text": "Last",
-                "translated_text": "最后",
+                "target_text": "最后",
             },
         ],
     )
@@ -249,61 +256,26 @@ def test_replace_part_segments_keeps_token_ranges(tmp_path: Path) -> None:
         (7, 9),
     ]
     assert "batch_id" not in segments[0]
-    assert [segment["translated_text"] for segment in segments] == ["第一", "跨窗口", "最后"]
+    assert [segment["target_text"] for segment in segments] == ["第一", "跨窗口", "最后"]
 
 
-def test_init_db_drops_retired_window_tables(tmp_path: Path) -> None:
-    database = tmp_path / "old.db"
-    connection = sqlite3.connect(database)
-    connection.executescript(
-        """
-        CREATE TABLE projects (id TEXT PRIMARY KEY);
-        CREATE TABLE subtitle_parts (
-            id INTEGER PRIMARY KEY,
-            project_id TEXT,
-            sequence INTEGER
-        );
-        CREATE TABLE subtitle_batches (
-            id INTEGER PRIMARY KEY,
-            project_id TEXT,
-            part_id INTEGER,
-            sequence INTEGER
-        );
-        CREATE TABLE subtitle_review_issues (id INTEGER PRIMARY KEY, project_id TEXT);
-        CREATE TABLE segments (
-            id INTEGER PRIMARY KEY,
-            project_id TEXT NOT NULL,
-            sequence INTEGER NOT NULL,
-            start_ms INTEGER NOT NULL,
-            end_ms INTEGER NOT NULL,
-            source_text TEXT NOT NULL,
-            translated_text TEXT NOT NULL DEFAULT '',
-            batch_id INTEGER,
-            status TEXT NOT NULL DEFAULT 'machine_translated',
-            updated_at TEXT NOT NULL,
-            UNIQUE(project_id, sequence)
-        );
-        INSERT INTO segments (
-            project_id, sequence, start_ms, end_ms, source_text, translated_text,
-            batch_id, status, updated_at
-        ) VALUES ('p', 0, 0, 1000, 'Hello', '你好', 1, 'machine_translated', 't');
-        """
-    )
-    connection.close()
-
+def test_init_db_uses_only_current_domain_tables(tmp_path: Path) -> None:
+    database = tmp_path / "fresh.db"
     init_db(database)
-
-    connection = sqlite3.connect(database)
-    tables = {
-        row[0]
-        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-    }
-    columns = {row[1] for row in connection.execute("PRAGMA table_info(segments)")}
-    row = connection.execute(
-        "SELECT source_text, translated_text FROM segments"
-    ).fetchone()
-    connection.close()
-    assert "subtitle_batches" not in tables
-    assert "subtitle_review_issues" not in tables
-    assert "batch_id" not in columns
-    assert row == ("Hello", "你好")
+    with sqlite3.connect(database) as connection:
+        tables = {
+            row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert {
+            "projects", "tokens", "parts", "part_punctuation", "punctuation_marks",
+            "translation_contexts", "cues", "subcues", "segments",
+            "segment_components", "jobs", "app_settings",
+        } <= tables
+        assert "timed_tokens" not in tables
+        assert "subtitle_parts" not in tables
+        assert "source_sentences" not in tables
+        segment_columns = {row[1] for row in connection.execute("PRAGMA table_info(segments)")}
+        assert "segment_order" in segment_columns
+        assert "sequence" not in segment_columns

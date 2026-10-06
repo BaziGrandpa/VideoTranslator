@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.services.source_sentences import token_payload
+from app.services.cues import token_payload
 from app.services.subtitle_quality import RULES
 
 SECURITY_BLOCK = (
@@ -16,7 +16,7 @@ def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def global_context_payload(context: dict[str, Any] | None) -> dict[str, Any]:
+def translation_context_payload(context: dict[str, Any] | None) -> dict[str, Any]:
     context = context or {}
     terms: list[dict[str, Any]] = []
     for term in context.get("terms") or []:
@@ -46,7 +46,7 @@ def build_punctuation_prompt(
 ) -> str:
     transcript = " ".join(str(token["normalized_text"]) for token in tokens)
     indexed = "\n".join(
-        f'{int(token["sequence"])}\t{token["normalized_text"]!s}' for token in tokens
+        f'{int(token["token_id"])}\t{token["normalized_text"]!s}' for token in tokens
     )
     return (
         "You are the punctuation restoration pass for an English transcript. Read the COMPLETE "
@@ -71,7 +71,7 @@ def build_punctuation_prompt(
     )
 
 
-def build_global_context_prompt(
+def build_translation_context_prompt(
     transcript: str,
     target_language: str,
     title: str,
@@ -113,7 +113,7 @@ def build_global_context_prompt(
     )
 
 
-def build_global_context_consolidation_prompt(
+def build_translation_context_consolidation_prompt(
     title: str,
     target_language: str,
     candidate_stats: list[dict[str, Any]],
@@ -145,13 +145,13 @@ def build_global_context_consolidation_prompt(
     )
 
 
-def build_reference_translation_prompt(
+def build_part_translation_prompt(
     source_text: str,
     target_language: str,
     title: str,
     part_number: int,
     part_count: int,
-    global_context: dict[str, Any] | None = None,
+    translation_context: dict[str, Any] | None = None,
 ) -> str:
     return (
         "You are Pass 1. Translate the complete English transcript below into "
@@ -179,15 +179,15 @@ def build_reference_translation_prompt(
         f"{SECURITY_BLOCK}\n\n"
         f"Video title: {title}\nPart: {part_number}/{part_count}\n"
         "GLOBAL PROJECT CONTEXT:\n"
-        f"{_dump(global_context_payload(global_context))}\n\n"
+        f"{_dump(translation_context_payload(translation_context))}\n\n"
         "BEGIN TRANSCRIPT\n"
         f"{source_text}\n"
         "END TRANSCRIPT"
     )
 
 
-def build_sentence_alignment_prompt(
-    source_sentences: list[dict[str, Any]],
+def build_cue_alignment_prompt(
+    cues: list[dict[str, Any]],
     target_language: str,
     title: str,
     part_number: int,
@@ -196,12 +196,12 @@ def build_sentence_alignment_prompt(
 ) -> str:
     payload = [
         {
-            "source_sentence_id": int(item["source_sentence_id"]),
-            "source_sentence": str(item["source_sentence"]),
+            "cue_id": int(item["cue_id"]),
+            "source_text": str(item["source_text"]),
         }
-        for item in source_sentences
+        for item in cues
     ]
-    expected = [int(item["source_sentence_id"]) for item in source_sentences]
+    expected = [int(item["cue_id"]) for item in cues]
     return (
         "You are Pass 2. Python has already cut this Part into fixed English cues. Pass 1 already "
         f"produced the continuous {target_language} translation. Your first job is to place that "
@@ -216,57 +216,57 @@ def build_sentence_alignment_prompt(
         "is allowed only to sit on a cue boundary. Do not split or merge cues. Do not split for "
         "subtitle length. Follow Pass 0 terms already realized in Pass 1.\n\n"
         "Every Cue contains spoken English and must receive a nonempty Chinese fragment. "
-        "Never return an empty or whitespace-only chinese_sentence. If a Cue begins or ends "
+        "Never return an empty or whitespace-only target_text. If a Cue begins or ends "
         "mid-thought, divide the corresponding Pass 1 wording across the Cue boundary; "
         "do not place all of its meaning in a neighboring Cue and leave this one blank. "
-        "Check that every source_sentence_id has nonempty Chinese before returning.\n\n"
+        "Check that every cue_id has nonempty Chinese before returning.\n\n"
         "Return exactly one output row for every Cue, in the supplied order. The JSON field "
-        "source_sentence_id is the Cue ID. The JSON field chinese_sentence holds that cue's Chinese. "
+        "cue_id is the Cue ID. The JSON field target_text holds that cue's Chinese. "
         "Do not return English, Token IDs, timestamps, commentary, or Markdown. Return only JSON "
         "matching the schema.\n\n"
         f"{SECURITY_BLOCK}\n\n"
         f"TITLE: {title}\nPART: {part_number}/{part_count}\n"
-        f"GLOBAL PROJECT CONTEXT: {_dump(global_context_payload(translation_context))}\n\n"
+        f"GLOBAL PROJECT CONTEXT: {_dump(translation_context_payload(translation_context))}\n\n"
         "FULL PASS 1 PART TRANSLATION:\n"
-        f"{str(translation_context.get('reference_translation', '')).strip()}\n\n"
+        f"{str(translation_context.get('target_text', '')).strip()}\n\n"
         f"EXPECTED OUTPUT IDS: {json.dumps(expected, separators=(',', ':'))}\n"
-        f"SOURCE SENTENCES: {_dump(payload)}"
+        f"SOURCE CUES: {_dump(payload)}"
     )
 
 
-def build_sentence_boundary_prompt(
+def build_subcue_boundary_prompt(
     tokens: list[dict[str, Any]],
-    parent_segments: list[dict[str, Any]],
-    all_source_sentences: list[dict[str, Any]],
+    parent_cues: list[dict[str, Any]],
+    all_cues: list[dict[str, Any]],
     prepared: dict[int, list[str]],
     target_language: str,
     title: str,
 ) -> str:
-    sentence_by_id = {int(item["source_sentence_id"]): item for item in all_source_sentences}
+    cue_by_id = {int(item["cue_id"]): item for item in all_cues}
     payload = []
-    for parent in parent_segments:
-        sentence_id = int(parent["source_sentence_id"])
-        source = sentence_by_id.get(sentence_id, parent)
+    for parent in parent_cues:
+        cue_id = int(parent["cue_id"])
+        source = cue_by_id.get(cue_id, parent)
         payload.append(
             {
-                "source_sentence_id": sentence_id,
-                "source_sentence": str(source.get("source_sentence", parent["source_text"])),
+                "cue_id": cue_id,
+                "source_text": str(source.get("source_text", parent["source_text"])),
                 "start_token_id": int(parent["start_token_id"]),
                 "end_token_id": int(parent["end_token_id"]),
                 "tokens": token_payload(
                     tokens, int(parent["start_token_id"]), int(parent["end_token_id"])
                 ),
-                "subsentences": [
-                    {"subsentence_id": index, "chinese_sentence": chinese}
-                    for index, chinese in enumerate(prepared[sentence_id], start=1)
+                "subcues": [
+                    {"subcue_id": index, "target_text": chinese}
+                    for index, chinese in enumerate(prepared[cue_id], start=1)
                 ],
             }
         )
     return (
         "You are Pass 3-1. Python has already split each long Chinese parent into fixed ordered "
-        "sub-cues. YOUR ONLY TASK is to assign one end_token_id to every supplied subsentence_id. "
-        "Do not rewrite, return, merge, split, or reorder Chinese. Return only source_sentence_id, "
-        "subsentence_id, and end_token_id.\n\n"
+        "sub-cues. YOUR ONLY TASK is to assign one end_token_id to every supplied subcue_id. "
+        "Do not rewrite, return, merge, split, or reorder Chinese. Return only cue_id, "
+        "subcue_id, and end_token_id.\n\n"
         "The fixed Chinese sub-cues take priority. English Tokens are ordered anchors for looking "
         "up timing later; no elapsed-time information is provided here. English and Chinese inside "
         "a sub-cue need not match as meaning groups, and English grammatical completeness is not "
@@ -280,7 +280,7 @@ def build_sentence_boundary_prompt(
         "least one speech Token, and the final end_token_id must equal the parent's end_token_id. "
         "If the fixed Chinese pieces make balanced ranges impossible, return the best valid "
         "boundaries.\n\n"
-        "Return every supplied source_sentence_id and subsentence_id exactly once and in order. "
+        "Return every supplied cue_id and subcue_id exactly once and in order. "
         "Return only JSON matching the schema.\n\n"
         f"{SECURITY_BLOCK}\n\n"
         f"TITLE: {title}\nTARGET LANGUAGE: {target_language}\n"
@@ -288,23 +288,23 @@ def build_sentence_boundary_prompt(
     )
 
 
-def build_sentence_split_prompt(
+def build_subcue_split_prompt(
     tokens: list[dict[str, Any]],
-    parent_segments: list[dict[str, Any]],
-    all_source_sentences: list[dict[str, Any]],
+    parent_cues: list[dict[str, Any]],
+    all_cues: list[dict[str, Any]],
     target_language: str,
     title: str,
 ) -> str:
-    sentence_by_id = {int(item["source_sentence_id"]): item for item in all_source_sentences}
+    cue_by_id = {int(item["cue_id"]): item for item in all_cues}
     payload = []
-    for parent in parent_segments:
-        sentence_id = int(parent["source_sentence_id"])
-        source = sentence_by_id.get(sentence_id, parent)
+    for parent in parent_cues:
+        cue_id = int(parent["cue_id"])
+        source = cue_by_id.get(cue_id, parent)
         payload.append(
             {
-                "source_sentence_id": sentence_id,
-                "source_sentence": str(source.get("source_sentence", parent["source_text"])),
-                "chinese_sentence": str(parent["translated_text"]),
+                "cue_id": cue_id,
+                "source_text": str(source.get("source_text", parent["source_text"])),
+                "target_text": str(parent["target_text"]),
                 "tokens": token_payload(
                     tokens, int(parent["start_token_id"]), int(parent["end_token_id"])
                 ),
@@ -333,8 +333,8 @@ def build_sentence_split_prompt(
         "Chinese merely to make an English fragment self-contained. Chinese readability and length "
         "control take priority; the English Tokens only need to remain in their original order with "
         "complete contiguous coverage. End token IDs must stay strictly increasing.\n\n"
-        "For each parent, return its source_sentence_id and ordered subsentences. Each subsentence "
-        "contains only chinese_sentence and end_token_id. Python infers the first start from the "
+        "For each parent, return its cue_id and ordered subcues. Each Sub-cue "
+        "contains only target_text and end_token_id. Python infers the first start from the "
         "parent and every later start as previous.end_token_id + 1. End IDs must strictly increase, "
         "must stay inside the parent, and the final end_token_id must equal the parent's final Token "
         "ID. Every resulting range must contain at least one Token whose kind is speech. Tokens marked "
@@ -342,5 +342,5 @@ def build_sentence_split_prompt(
         "supplied parent exactly once and in order. Return only JSON matching the schema.\n\n"
         f"{SECURITY_BLOCK}\n\n"
         f"TITLE: {title}\nTARGET LANGUAGE: {target_language}\n"
-        f"LONG SOURCE SENTENCES: {_dump(payload)}"
+        f"LONG SOURCE CUES: {_dump(payload)}"
     )

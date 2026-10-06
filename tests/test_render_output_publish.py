@@ -39,7 +39,7 @@ def test_render_publishes_only_completed_video(
     render_args = (
         tmp_path / "project",
         tmp_path / "source.mp4",
-        [{"start_ms": 0, "end_ms": 1000, "source_text": "Hello", "translated_text": "你好"}],
+        [{"start_ms": 0, "end_ms": 1000, "source_text": "Hello", "target_text": "你好"}],
         True,
     )
 

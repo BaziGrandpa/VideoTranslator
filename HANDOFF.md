@@ -1,106 +1,98 @@
 # Video Translator Handoff
 
-Last updated: 2026-09-23
+Last updated: 2026-10-06
 
-This is a local YouTube-to-bilingual-subtitle workbench. The user communicates in Chinese.
-Code, filenames, identifiers, UI labels, and documentation stay in English.
+This is a local YouTube-to-Chinese-subtitle workbench. The user communicates in Chinese.
+Code, identifiers, UI labels, and documentation use English. Do not commit `ideas.txt`.
 
 ## Constraints
 
-- Do not use paid APIs or API keys. Translation uses the locally authenticated Codex CLI,
-  with the Grok CLI as the configured fallback.
-- Do not silently switch providers during a targeted acceptance test.
-- SQLite is the source of truth. FFmpeg burns the final subtitles. The browser is for timing;
-  exact visual review uses an FFmpeg PNG.
-- Final subtitles are bilingual by default, Chinese above English, with project-specific styling.
-- Timed Tokens stay immutable. Edits change Sub-cues, not raw tokens.
-- `Save style` stores that project's style and becomes the default for the next new project.
-  `.env` subtitle values apply only before any style has been saved.
-- Do not commit `ideas.txt`.
+- Translation uses authenticated local Codex and optional Grok CLIs. There are no paid API keys.
+- Tests for the translation pipeline must simulate provider output; never run the real CLIs.
+- SQLite is the source of truth. FFmpeg burns the final subtitles.
+- The final product is readable Chinese subtitles. English Tokens primarily locate time.
+- Store original Token text and timing unchanged. Manual text and timing edits affect Segments.
 
-## Run
+## Run and verify
 
-- Start: `start-video-translator.bat`
-- Stop: `stop-video-translator.bat`
+- Start: `start-video-translator.bat`; stop: `stop-video-translator.bat`
 - URL: `http://127.0.0.1:6866`
-- Database: `data/video_translator.db`
+- Database: `data/video_translator_v2.db`
 - Project files: `data/projects/<project-id>`
 - Final video: `output/<project-id>`
 
-Restart the app after JavaScript or prompt changes. Tests must not call the real CLIs.
+The previous `data/video_translator.db` is intentionally not migrated. Start with a
+new v2 database. Restart the application after JavaScript or prompt changes.
 
 ```powershell
 .\.venv\Scripts\python.exe -m ruff check .
 node --check app/static/app.js
-.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pytest -q --ignore=tests/test_renderer_integration.py
 ```
 
-## Names
+The excluded renderer integration test starts real FFmpeg. Translation tests use
+saved responses and simulated provider calls. `tests/test_historical_replay.py`
+replays Pass 1/2/3 data extracted read-only from the old database.
 
-| Word | Meaning | Stored as |
+## Domain language
+
+| Concept | Identity | Table |
 | --- | --- | --- |
-| Token | One immutable English word with time | `timed_tokens.sequence`; prompts say `token_id` |
-| Part | About 30 minutes. One model call per pass | `subtitle_parts` |
-| Cue | Python-cut English range, numbered from 1 inside a Part | `source_sentence_id` |
-| Sub-cue | One on-screen subtitle row. `sub_id` 0 if unsplit, else 1, 2, 3 | table `segments`; workbench key `segments.id` |
+| Token | Original English word; `token_id` is project-local and 0-based | `tokens` |
+| Part | Processing range; `part_number` is project-local and 1-based | `parts` |
+| Cue | Python-cut English range; `cue_id` is Part-local and 1-based | `cues` |
+| Sub-cue | Optional validated Pass 3 split; `subcue_id` is Cue-local and 1-based | `subcues` |
+| Segment | Final on-screen subtitle; `segment_order` is project-local and 1-based | `segments` |
 
-Prompt version: `sentence-pipeline-v8.6` in `app/services/subtitle_quality.py`.
-JSON fields stay `source_sentence_id` and `chinese_sentence`. Bump the version only when
-prompt wording changes.
+`segment_components` records the ordered Cue/Sub-cue sources of each Segment.
+A whole Cue uses a null `subcue_id`. One Segment may contain several Sub-cues or
+whole Cues. The `subcues` table keeps validated pre-merge splits for diagnosis.
+`cues.split_status` and `cues.split_error` record the outcome of Pass 3.
+Segment `target_text` keeps punctuation; display/render text removes trailing
+punctuation through `display_target_text`.
 
-Window and Batch are retired. They are not model-request slices and not rebuild selections.
-`init_db` drops `subtitle_batches`, `subtitle_review_issues`, and `segments.batch_id`.
-A queued job whose kind is still `partial_rebuild` fails and asks for a Part rebuild.
+Other tables: `projects`, `part_punctuation`, `punctuation_marks`,
+`translation_contexts`, `jobs`, `app_settings`. There are no Window or Batch
+migration tables. `init_db` creates the current schema only.
 
-## Pipeline
+## Pipeline ownership
 
-1. Download the video and English captions, or use WhisperX when captions are missing.
-2. Rebuild Timed Tokens. This layer is never edited.
-3. Split the video into Parts of about 30 minutes (20–40). A video of 40 minutes or less is one Part.
-4. New projects and full rebuilds create Parts before Pass 0. For each Part with zero original
-   `, . ? ! : ;` marks, the Punctuation Pass calls the first selected provider once to return
-   `after_token_id`/`mark` annotations. Python validates and stores them separately from immutable
-   Timed Tokens. Failed or interrupted requests stop with a visible error and are never
-   automatically sent again. Existing projects enter this stage only after a full rebuild.
-5. Pass 0 reads the punctuated view, writes the project overview, style, and terminology, then
-   waits for approval.
-   Videos up to 12,000 tokens use one call. Longer videos use 6,000-token chunks plus one
-   consolidation call. That chunking is not stored as Parts.
-6. Pass 1 translates one whole Part into continuous Chinese.
-7. Python cuts that Part into Cues from punctuation, speaker markers, pauses of at least
-   1,200 ms, and a 40-word cap.
-8. Pass 2 places the Pass 1 Chinese onto every Cue in the Part. One call. It does not
-   retranslate from English. Concatenated Cue Chinese should recover Pass 1.
-9. Pass 3 runs only for Cues whose Chinese exceeds 24 display units. Punctuation splits go to
-   Pass 3-1, which only fills `end_token_id`. Other long Cues go to Pass 3-2. Each kind is at
-   most one call per Part. Prefer 18 display units when already splitting.
-10. After Pass 3, Python stamps mechanical review flags once.
+| Stage | Responsibility | Database output |
+| --- | --- | --- |
+| Token preparation | Reconstruct English words and timing | `tokens` |
+| Part planning | Group Tokens into processing ranges | `parts` |
+| Punctuation Pass | Add marks only when a Part lacks supported source punctuation | `part_punctuation`, `punctuation_marks` |
+| Pass 0 | Build project overview, style, and terminology; await approval | `translation_contexts` |
+| Pass 1 | Translate the whole Part into natural Chinese with length and punctuation guidance | `parts.source_text`, `parts.target_text` |
+| Python Cue cutting | Fix English Token ranges for Pass 2 | `cues` |
+| Pass 2 | Place Chinese text on each fixed Cue | `cues.target_text`; Part checkpoint |
+| Pass 3-1 | Assign Token boundaries to Chinese punctuation splits | validated `subcues` |
+| Pass 3-2 | Split other long Chinese Cues and assign boundaries | validated `subcues` |
+| Finalization | Merge when needed, validate coverage and quality, publish screen rows | `segments`, `segment_components` |
 
-## Rebuild
+The Punctuation Pass calls only the first selected provider once. Pass 0 uses one
+request for up to 12,000 Tokens, or 6,000-Token chunks and one consolidation for
+longer projects. Pass 1 and Pass 2 use one request per Part. Pass 3-1 and 3-2 each
+use at most one request per Part when needed. A configured provider fallback can
+retry the same Pass after a failed provider call.
 
-- Full rebuild clears Pass 0 (unless Skip Pass 0 is checked), tokens, Parts, and cues, then
-  runs the pipeline again. The downloaded video and source captions remain.
-- Selected Parts keeps the approved Pass 0 guidance and the current subtitles. Each selected
-  Part reruns Pass 1, Pass 2, and Pass 3 for that entire Part. Other Parts stay unchanged.
-  Results publish together. If the subtitle revision changed during the run, publication is
-  rejected.
+Pass 2 prompt behavior is intentionally unchanged apart from output field names.
+Pass 3 prioritizes Chinese readability; English Token ranges locate time.
+No final Cue-to-Segment one-to-one relationship is required.
 
-## Review
+## Rebuild and review
 
-A Sub-cue is listed when its Chinese exceeds 24 display units, its duration is under 700 ms
-(except a tiny reply), its duration exceeds 5,000 ms, its reading speed exceeds 12 units per
-second, or Pass 3 could not split it. The list is computed from the current rows. There is no
-severity and no Apply action.
+A full rebuild clears subtitle state and may preserve approved Pass 0 guidance.
+A selected-Part rebuild keeps visible Segments and Pass 0 until all selected Parts
+finish. It publishes Cues, Sub-cues, Segments, and links together under a subtitle
+revision guard. Review issues are computed from current Segments.
 
 ## Code map
 
-- API: `app/main.py`
-- Schema and migration: `app/db.py`
-- Persistence: `app/repository.py`
+- API and UI: `app/main.py`, `app/static/app.js`
+- Schema and persistence: `app/db.py`, `app/repository.py`
 - Pipeline: `app/pipeline.py`
-- Worker: `app/worker.py`
-- Prompts: `app/services/prompts.py`
-- Cue cutting: `app/services/source_sentences.py`
-- Pass calls: `app/services/subtitle_planner.py`
-- Quality flags: `app/services/subtitle_quality.py`
-- Browser: `app/static/index.html`, `app/static/app.js`, `app/static/styles.css`
+- Prompt contracts: `app/services/prompts.py`, `app/schemas/`
+- Part/Cue cutting: `app/services/parts.py`, `app/services/cues.py`
+- Pass calls and final merging: `app/services/subtitle_planner.py`
+- Rendering and display punctuation: `app/services/renderer.py`, `app/services/subtitle_text.py`

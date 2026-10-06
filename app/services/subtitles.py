@@ -1,21 +1,15 @@
 from __future__ import annotations
 
-import html
 import re
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from app.services.subtitle_text import display_translated_text, normalize_source_text
+from app.services.subtitle_text import display_target_text, normalize_source_text
 
 TIMESTAMP_RE = re.compile(
     r"(?P<start>\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3})\s+-->\s+"
     r"(?P<end>\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3})"
 )
-TAG_RE = re.compile(r"<[^>]+>")
-VOICE_PREFIX_RE = re.compile(r"^\s*<v[^>]*>", re.IGNORECASE)
-
-
 def timestamp_to_ms(value: str) -> int:
     normalized = value.replace(",", ".")
     parts = normalized.split(":")
@@ -46,64 +40,6 @@ def ms_to_ass(value: int) -> str:
     return f"{hours}:{minutes:02}:{seconds:02}.{centiseconds:02}"
 
 
-def clean_caption_text(value: str) -> str:
-    value = VOICE_PREFIX_RE.sub("", value)
-    value = TAG_RE.sub("", value)
-    value = html.unescape(value)
-    lines = [re.sub(r"\s+", " ", line).strip() for line in value.splitlines()]
-    return " ".join(line for line in lines if line).strip()
-
-
-def parse_vtt(path: Path) -> list[dict[str, Any]]:
-    lines = path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
-    segments: list[dict[str, Any]] = []
-    index = 0
-    while index < len(lines):
-        match = TIMESTAMP_RE.search(lines[index])
-        if not match:
-            index += 1
-            continue
-        start_ms = timestamp_to_ms(match.group("start"))
-        end_ms = timestamp_to_ms(match.group("end"))
-        index += 1
-        text_lines: list[str] = []
-        while index < len(lines) and lines[index].strip():
-            text_lines.append(lines[index])
-            index += 1
-        text = clean_caption_text("\n".join(text_lines))
-        if text and end_ms > start_ms:
-            segments.append({"start_ms": start_ms, "end_ms": end_ms, "source_text": text})
-        index += 1
-    return deduplicate_segments(segments)
-
-
-def deduplicate_segments(segments: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Remove exact rolling-caption duplicates while preserving useful timing."""
-    result: list[dict[str, Any]] = []
-    for raw in segments:
-        segment = dict(raw)
-        text = clean_caption_text(str(segment.get("source_text", "")))
-        if not text:
-            continue
-        segment["source_text"] = text
-        segment["start_ms"] = int(segment["start_ms"])
-        segment["end_ms"] = int(segment["end_ms"])
-        if result and result[-1]["source_text"] == text:
-            result[-1]["end_ms"] = max(result[-1]["end_ms"], segment["end_ms"])
-            continue
-        result.append(segment)
-    # YouTube rolling captions frequently overlap. Keep a single active segment by
-    # trimming the previous cue to the next cue's start; the user can fine-tune it.
-    normalized: list[dict[str, Any]] = []
-    for segment in result:
-        if normalized and segment["start_ms"] < normalized[-1]["end_ms"]:
-            normalized[-1]["end_ms"] = segment["start_ms"]
-            if normalized[-1]["end_ms"] <= normalized[-1]["start_ms"]:
-                normalized.pop()
-        normalized.append(segment)
-    return normalized
-
-
 def validate_segments(segments: list[dict[str, Any]]) -> list[str]:
     problems: list[str] = []
     previous: dict[str, Any] | None = None
@@ -116,7 +52,7 @@ def validate_segments(segments: list[dict[str, Any]]) -> list[str]:
             problems.append(f"Subtitle {index} must end after it starts")
         if not str(segment.get("source_text", "")).strip():
             problems.append(f"Subtitle {index} has empty source text")
-        if not display_translated_text(str(segment.get("translated_text", ""))):
+        if not display_target_text(str(segment.get("target_text", ""))):
             problems.append(f"Subtitle {index} has an empty translation")
         if previous and start_ms < int(previous["end_ms"]):
             problems.append(f"Subtitles {index - 1} and {index} overlap")
@@ -129,8 +65,8 @@ def write_srt(path: Path, segments: list[dict[str, Any]], field: str) -> None:
     for index, segment in enumerate(segments, start=1):
         raw_text = str(segment.get(field, ""))
         text = (
-            display_translated_text(raw_text)
-            if field == "translated_text"
+            display_target_text(raw_text)
+            if field == "target_text"
             else normalize_source_text(raw_text)
         )
         blocks.append(
@@ -197,7 +133,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     for segment in segments:
         start = ms_to_ass(segment["start_ms"])
         end = ms_to_ass(segment["end_ms"])
-        translated = ass_escape(display_translated_text(str(segment["translated_text"])))
+        translated = ass_escape(display_target_text(str(segment["target_text"])))
         events.append(f"Dialogue: 1,{start},{end},Chinese,,0,0,0,,{translated}")
         if bilingual:
             source = ass_escape(normalize_source_text(str(segment["source_text"])))
