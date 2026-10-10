@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from app.cards.render import append_card_filters, prepare_card_images
 from app.config import command_available, settings
 from app.services.subtitle_style import merge_subtitle_style
 from app.services.subtitles import validate_segments, write_ass, write_srt
@@ -92,6 +93,7 @@ def render_project(
     output_dir: Path | None = None,
     progress_callback: Callable[[int], None] | None = None,
     subtitle_style: dict[str, Any] | None = None,
+    cards: list[dict[str, Any]] | None = None,
 ) -> Path:
     if not command_available(settings.ffmpeg_bin):
         raise RuntimeError(
@@ -115,7 +117,10 @@ def render_project(
     width, height = probe_video(video_path)
     # Generate the gradient once and repeat that frame. Applying geq to the source
     # video would recalculate every pixel of every frame and make 1080p renders slow.
-    filter_graph = build_filter_graph(width, height, style)
+    prepared_cards = prepare_card_images(render_dir, cards or [], width, height)
+    filter_graph = append_card_filters(
+        build_filter_graph(width, height, style), prepared_cards
+    )
     filter_script = render_dir / "filter.ffscript"
     filter_script.write_text(filter_graph, encoding="utf-8")
     output_path = output_dir / f"final-{version_suffix}.mp4"
@@ -130,6 +135,11 @@ def render_project(
         "pipe:1",
         "-i",
         str(video_path),
+        *[
+            argument
+            for item in prepared_cards
+            for argument in ("-loop", "1", "-framerate", "1", "-i", str(item["path"]))
+        ],
         "-/filter_complex",
         str(filter_script),
         "-map",
@@ -138,6 +148,10 @@ def render_project(
         "0:a?",
         "-c:v",
         "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-profile:v",
+        "high",
         "-crf",
         "20",
         "-preset",

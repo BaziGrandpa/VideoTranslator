@@ -2,6 +2,10 @@ const state = {
   projects: [],
   project: null,
   segments: [],
+  segmentDataProjectId: null,
+  segmentLoadingProjectId: null,
+  segmentLoadToken: 0,
+  projectLoadToken: 0,
   reviewIssues: [],
   reviewMode: false,
   selectedId: null,
@@ -41,23 +45,7 @@ const $ = (selector) => document.querySelector(selector);
 const subtitleStyleClipboardKey = "videoTranslatorSubtitleStyleClipboardV1";
 
 function ensureExactPreviewButton() {
-  const styleButton = $("#subtitle-style-button");
-  if (!styleButton?.parentElement) return null;
-  let group = styleButton.closest(".preview-style-actions");
-  if (!group) {
-    group = document.createElement("div");
-    group.className = "preview-style-actions";
-    styleButton.insertAdjacentElement("beforebegin", group);
-    group.append(styleButton);
-  }
-  let button = $("#exact-preview-button");
-  if (!button) {
-    button = document.createElement("button");
-    button.id = "exact-preview-button";
-    button.textContent = "Preview";
-  }
-  if (button.parentElement !== group) group.append(button);
-  return button;
+  return $("#exact-preview-button");
 }
 
 ensureExactPreviewButton();
@@ -261,6 +249,7 @@ function updateSubtitlePreviewGeometry() {
   root.style.setProperty("--mask-bottom", `${offsetY}px`);
   root.style.setProperty("--mask-width", `${renderedWidth}px`);
   root.style.setProperty("--mask-height", `${renderedHeight * maskHeightRatio}px`);
+  window.CardsUI?.layout();
 }
 
 function observeSubtitlePreviewGeometry() {
@@ -315,7 +304,38 @@ function projectDisplayName(project) {
   return project?.display_name || project?.title || "Waiting for video metadata";
 }
 
+function reviewWorkspaceReady(project) {
+  if (!project?.video_path || !project.segment_count) return false;
+  if (["waiting_review", "completed"].includes(project.status)) return true;
+  if (["render_queued", "rendering"].includes(project.stage)) return true;
+  return project.status === "failed"
+    && project.subtitle_revision > 0
+    && !project.pending_rebuild_scope
+    && Array.isArray(project.parts)
+    && project.parts.length > 0
+    && project.parts.every((part) => part.status === "completed");
+}
+
+function clearReviewData() {
+  state.segmentLoadToken += 1;
+  state.segmentDataProjectId = null;
+  state.segmentLoadingProjectId = null;
+  state.segments = [];
+  state.reviewIssues = [];
+  state.reviewMode = false;
+  state.selectedId = null;
+  state.activeId = null;
+  state.previewToken += 1;
+  const video = $("#video");
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  renderSegments();
+  updatePreview();
+}
+
 async function openProject(projectId) {
+  if (window.CardsUI && !(await window.CardsUI.flush())) return;
   if (
     state.contextDirty
     && !window.confirm("Discard unsaved Pass 0 translation guidance changes?")
@@ -328,16 +348,19 @@ async function openProject(projectId) {
   if (state.exactPreview.open) {
     await discardExactPreview();
   }
+  const loadToken = ++state.projectLoadToken;
+  $("#review-workspace").classList.add("hidden");
+  $("#video").pause();
   try {
-    state.project = await api(`/api/projects/${projectId}`);
+    const project = await api(`/api/projects/${projectId}`);
+    if (loadToken !== state.projectLoadToken) return;
+    state.project = project;
   } catch (error) {
     if (reloadAfterMissingProject(error)) return;
+    if (loadToken === state.projectLoadToken) renderProject();
     throw error;
   }
-  state.segments = [];
-  state.reviewIssues = [];
-  state.reviewMode = false;
-  state.selectedId = null;
+  clearReviewData();
   state.unsavedSegmentFields.clear();
   state.segmentTextSaves.clear();
   state.independentTimingBoundaries.clear();
@@ -348,10 +371,12 @@ async function openProject(projectId) {
   $("#subtitle-style-panel").classList.add("hidden");
   $("#welcome").classList.add("hidden");
   $("#project-view").classList.remove("hidden");
+  const cardsLoad = window.CardsUI?.loadProject();
   renderProject();
   renderProviderControl();
   renderProjectList();
-  if (state.project.segment_count) await loadSegments();
+  if (reviewWorkspaceReady(state.project)) await loadSegments(projectId);
+  await cardsLoad;
   syncPolling();
 }
 
@@ -367,6 +392,10 @@ function projectIsRenderLocked(project = state.project) {
 function renderProject() {
   const project = state.project;
   if (!project) return;
+  const passesFinished = reviewWorkspaceReady(project);
+  if (!passesFinished && (
+    state.segmentDataProjectId || state.segments.length || $("#video").getAttribute("src")
+  )) clearReviewData();
   const renderLocked = projectIsRenderLocked(project);
   const partialRebuildLocked = Boolean(project.pending_rebuild_scope);
   const subtitleLocked = renderLocked || partialRebuildLocked;
@@ -414,7 +443,8 @@ function renderProject() {
       actions.append(location);
     }
   }
-  const canReview = project.segment_count > 0;
+  const canShowWorkspace = passesFinished && state.segmentDataProjectId === project.id;
+  const canReview = canShowWorkspace && project.segment_count > 0;
   const approveButton = $("#approve-render");
   approveButton.textContent = project.status === "completed"
     ? "Render new version"
@@ -424,14 +454,14 @@ function renderProject() {
   const rebuildButton = $("#rebuild-subtitles");
   rebuildButton.classList.toggle(
     "hidden",
-    !project.video_path || !["waiting_review", "completed", "failed"].includes(project.status),
+    !canShowWorkspace || !["waiting_review", "completed", "failed"].includes(project.status),
   );
   const styleButton = $("#subtitle-style-button");
   styleButton.classList.toggle("hidden", !canReview);
   styleButton.disabled = subtitleLocked;
   const exactPreviewButton = $("#exact-preview-button");
   if (exactPreviewButton) {
-    exactPreviewButton.classList.toggle("hidden", !canReview);
+    exactPreviewButton.classList.toggle("hidden", !canShowWorkspace);
     exactPreviewButton.disabled = subtitleLocked || state.reviewMode;
     exactPreviewButton.textContent = state.exactPreview.open
       ? "Exit preview"
@@ -444,14 +474,15 @@ function renderProject() {
     ? "All subtitles"
     : `Review suggestions (${state.reviewIssues.length})`;
   const workspace = $("#review-workspace");
-  workspace.classList.toggle("hidden", !canReview);
-  workspace.classList.toggle("render-locked", subtitleLocked);
-  workspace.inert = subtitleLocked;
+  workspace.classList.toggle("hidden", !canShowWorkspace);
+  workspace.classList.toggle("render-locked", renderLocked);
+  workspace.inert = renderLocked;
+  $("#subtitle-pane").inert = subtitleLocked;
   if (subtitleLocked) {
     $("#subtitle-style-panel").classList.add("hidden");
     if (state.exactPreview.open) void discardExactPreview();
   }
-  if (canReview) {
+  if (canShowWorkspace) {
     const video = $("#video");
     video.controls = !subtitleLocked;
     const expected = `${location.origin}/api/projects/${project.id}/video`;
@@ -460,6 +491,7 @@ function renderProject() {
       startVideoSync();
     }
   }
+  window.CardsUI?.renderProject();
 }
 
 const translationContextCategories = [
@@ -739,16 +771,30 @@ async function changeCodexModel(event) {
   }
 }
 
-async function loadSegments() {
-  [state.segments, state.reviewIssues] = await Promise.all([
-    api(`/api/projects/${state.project.id}/segments`),
-    api(`/api/projects/${state.project.id}/review-issues`),
-  ]);
-  if (!state.reviewIssues.length) state.reviewMode = false;
-  if (!state.selectedId && state.segments.length) state.selectedId = state.segments[0].id;
-  renderSegments();
-  renderProject();
-  updatePreview();
+async function loadSegments(projectId = state.project?.id) {
+  if (!projectId || !reviewWorkspaceReady(state.project)) return;
+  if (state.segmentLoadingProjectId === projectId) return;
+  const loadToken = state.segmentLoadToken;
+  state.segmentLoadingProjectId = projectId;
+  try {
+    const [segments, reviewIssues] = await Promise.all([
+      api(`/api/projects/${projectId}/segments`),
+      api(`/api/projects/${projectId}/review-issues`),
+    ]);
+    if (loadToken !== state.segmentLoadToken
+      || state.project?.id !== projectId
+      || !reviewWorkspaceReady(state.project)) return;
+    state.segments = segments;
+    state.reviewIssues = reviewIssues;
+    state.segmentDataProjectId = segments.length ? projectId : null;
+    if (!state.reviewIssues.length) state.reviewMode = false;
+    if (!state.selectedId && state.segments.length) state.selectedId = state.segments[0].id;
+    renderSegments();
+    renderProject();
+    updatePreview();
+  } finally {
+    if (loadToken === state.segmentLoadToken) state.segmentLoadingProjectId = null;
+  }
 }
 
 function renderSegments() {
@@ -957,7 +1003,9 @@ async function saveSegmentText(id, field, value) {
     const saved = await saveSegment(id, { [field]: value, status: "edited" });
     const segment = state.segments.find((item) => item.id === id);
     if (saved && segment?.[field] === value) state.unsavedSegmentFields.delete(key);
-    if (saved && state.exactPreview.open && state.exactPreview.segmentId === id) {
+    if (saved && state.exactPreview.open && segment
+      && state.exactPreview.timestampMs >= segment.start_ms
+      && state.exactPreview.timestampMs < segment.end_ms) {
       scheduleExactPreview();
     }
     return saved;
@@ -1144,6 +1192,7 @@ function startVideoSync() {
   const tick = () => {
     if (token !== state.previewToken) return;
     const now = video.currentTime * 1000;
+    window.CardsUI?.sync(now);
     const active = state.segments.find((segment) => now >= segment.start_ms && now < segment.end_ms) || null;
     const nextId = active?.id ?? null;
     if (state.activeId !== nextId) {
@@ -1155,7 +1204,8 @@ function startVideoSync() {
       updatePreview();
     }
     const selected = selectedSegment();
-    if ($("#loop-current").checked && selected && now >= selected.end_ms) {
+    if (window.CardsUI?.activeTab() !== "cards"
+      && $("#loop-current").checked && selected && now >= selected.end_ms) {
       video.currentTime = selected.start_ms / 1000;
       video.play();
     }
@@ -1206,6 +1256,7 @@ function focusFirstInvalidSegmentFromError(message) {
 
 async function approveAndRender() {
   if (!state.project || projectIsRenderLocked()) return;
+  if (window.CardsUI && !(await window.CardsUI.flush())) return;
   const projectId = state.project.id;
   if (!$("#subtitle-style-panel").classList.contains("hidden")) {
     if (!(await closeSubtitleStylePanel({ refreshExactPreview: false }))) return;
@@ -1382,16 +1433,7 @@ function fillSubtitleStylePanel() {
 
 function exactPreviewTarget() {
   const now = Math.round($("#video").currentTime * 1000);
-  const active = state.segments.find(
-    (segment) => now >= segment.start_ms && now < segment.end_ms,
-  );
-  if (active) return { segment: active, timestampMs: now };
-  const selected = selectedSegment() || state.segments[0];
-  if (!selected) return null;
-  return {
-    segment: selected,
-    timestampMs: Math.round((selected.start_ms + selected.end_ms) / 2),
-  };
+  return { timestampMs: now };
 }
 
 async function openSubtitleStylePanel() {
@@ -1402,23 +1444,25 @@ async function openSubtitleStylePanel() {
 }
 
 async function openExactPreview() {
-  if (!state.project || !state.segments.length || projectIsRenderLocked() || state.reviewMode) return;
+  if (!state.project || !state.project.video_path || projectIsRenderLocked() || state.reviewMode) return;
   if (!(await flushPendingSegmentSaves())) return;
+  try {
+    window.CardsUI?.currentDraft();
+  } catch (error) {
+    showToast(error.message);
+    return;
+  }
   const target = exactPreviewTarget();
   if (!target) return;
-  state.selectedId = target.segment.id;
   state.exactPreview.open = true;
   state.exactPreview.timestampMs = target.timestampMs;
-  state.exactPreview.segmentId = target.segment.id;
+  state.exactPreview.segmentId = null;
+  $("#exact-preview-time").value = (target.timestampMs / 1000).toFixed(1);
   $("#video").pause();
   $("#video").currentTime = target.timestampMs / 1000;
   document.querySelector(".video-stage").classList.add("exact-mode");
   $("#exact-preview-badge").textContent = `Exact FFmpeg preview · ${formatTime(target.timestampMs)}`;
   $("#exact-preview-badge").classList.remove("hidden");
-  document.querySelectorAll(".segment-row").forEach((row) => {
-    row.classList.toggle("selected", Number(row.dataset.id) === target.segment.id);
-  });
-  scrollSegmentListTo(target.segment.id);
   const exactPreviewButton = $("#exact-preview-button");
   if (exactPreviewButton) exactPreviewButton.textContent = "Exit preview";
   await renderExactPreview();
@@ -1562,15 +1606,20 @@ async function pasteSubtitleStyle() {
   }
 }
 
-function exactPreviewCacheKey(segment) {
+function exactPreviewCacheKey(draft) {
+  const active = state.segments.filter((segment) =>
+    state.exactPreview.timestampMs >= segment.start_ms
+      && state.exactPreview.timestampMs < segment.end_ms,
+  );
   return JSON.stringify({
     projectId: state.project.id,
     timestampMs: state.exactPreview.timestampMs,
     bilingual: state.project.bilingual,
     style: state.project.subtitle_style,
-    segmentId: segment.id,
-    sourceText: segment.source_text,
-    translatedText: segment.target_text,
+    subtitleRevision: state.project.subtitle_revision,
+    cardRevision: state.project.card_revision,
+    active,
+    draft,
   });
 }
 
@@ -1599,12 +1648,14 @@ function cacheExactPreview(key, url) {
 
 async function renderExactPreview() {
   if (!state.exactPreview.open || !state.project) return false;
-  const segment = state.segments.find(
-    (item) => item.id === state.exactPreview.segmentId,
-  );
-  if (!segment) return false;
-
-  const key = exactPreviewCacheKey(segment);
+  let draft;
+  try {
+    draft = window.CardsUI?.currentDraft() || null;
+  } catch (error) {
+    showToast(error.message);
+    return false;
+  }
+  const key = exactPreviewCacheKey(draft);
   const cached = state.exactPreview.cache.get(key);
   if (cached && !state.exactPreview.controller) {
     state.exactPreview.cache.delete(key);
@@ -1630,8 +1681,8 @@ async function renderExactPreview() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        segment_id: segment.id,
         timestamp_ms: state.exactPreview.timestampMs,
+        ...(draft ? { card_id: draft.id, card_draft: draft.payload } : {}),
       }),
       signal: controller.signal,
     });
@@ -1671,21 +1722,13 @@ function scheduleExactPreview() {
 }
 
 function stepExactPreview(direction) {
-  if (!state.exactPreview.open || !state.segments.length) return;
-  const currentId = state.exactPreview.segmentId ?? state.selectedId;
-  const currentIndex = state.segments.findIndex((segment) => segment.id === currentId);
-  const nextIndex = currentIndex + direction;
-  if (nextIndex < 0) {
-    showToast("This is the first subtitle");
-    return;
-  }
-  if (nextIndex >= state.segments.length) {
-    showToast("This is the last subtitle");
-    return;
-  }
-  const next = state.segments[nextIndex];
-  selectSegment(next.id, true);
-  scrollSegmentListTo(next.id);
+  if (!state.exactPreview.open) return;
+  const maximum = Math.max(0, (state.project?.duration_ms || 0) - 1);
+  state.exactPreview.timestampMs = Math.max(0, Math.min(
+    maximum, state.exactPreview.timestampMs + direction * 100,
+  ));
+  $("#exact-preview-time").value = (state.exactPreview.timestampMs / 1000).toFixed(1);
+  scheduleExactPreview();
 }
 
 function scrollSegmentListTo(segmentId) {
@@ -1768,6 +1811,7 @@ async function discardExactPreview() {
     (segment) => restoreMs >= segment.start_ms && restoreMs < segment.end_ms,
   )?.id ?? null;
   updatePreview();
+  window.CardsUI?.sync(restoreMs);
 }
 
 async function closeSubtitleStylePanel({ refreshExactPreview = true } = {}) {
@@ -1844,6 +1888,7 @@ async function performSaveSubtitleStyle({ renderPreview = true } = {}) {
 async function refreshCurrentProject() {
   if (!state.project) return;
   const projectId = state.project.id;
+  const loadToken = state.projectLoadToken;
   const previousCount = state.project.segment_count;
   const previousRevision = state.project.subtitle_revision;
   let project;
@@ -1853,15 +1898,20 @@ async function refreshCurrentProject() {
     if (reloadAfterMissingProject(error)) return;
     throw error;
   }
-  if (state.project?.id !== projectId) return;
+  if (loadToken !== state.projectLoadToken || state.project?.id !== projectId) return;
+  const needsSegments = reviewWorkspaceReady(project) && (
+    previousCount !== project.segment_count
+    || previousRevision !== project.subtitle_revision
+    || (state.segmentDataProjectId !== projectId
+      && state.segmentLoadingProjectId !== projectId)
+  );
+  if (needsSegments) clearReviewData();
   state.project = project;
   renderProject();
   renderProviderControl();
   await loadProjects();
-  if (
-    previousCount !== state.project.segment_count
-    || previousRevision !== state.project.subtitle_revision
-  ) await loadSegments();
+  if (state.project?.id !== projectId || loadToken !== state.projectLoadToken) return;
+  if (needsSegments) await loadSegments(projectId);
   syncPolling();
 }
 
@@ -1969,6 +2019,25 @@ $("#context-style").addEventListener("input", setTranslationContextDirty);
 $("#save-context-draft").addEventListener("click", () => void saveTranslationContext());
 $("#approve-context").addEventListener("click", () => void saveTranslationContext({ approve: true }));
 ensureExactPreviewButton()?.addEventListener("click", () => void toggleExactPreview());
+$("#exact-preview-refresh").addEventListener("click", () => {
+  if (!state.project?.video_path) return;
+  const seconds = Number($("#exact-preview-time").value);
+  if (!Number.isFinite(seconds) || seconds < 0 || seconds * 1000 >= state.project.duration_ms) {
+    showToast("Enter a time within the video duration");
+    return;
+  }
+  const timestampMs = Math.round(seconds * 1000);
+  if (state.exactPreview.open) {
+    state.exactPreview.timestampMs = timestampMs;
+    void renderExactPreview();
+  } else {
+    $("#video").currentTime = seconds;
+    void openExactPreview();
+  }
+});
+$("#exact-preview-time").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") $("#exact-preview-refresh").click();
+});
 $("#subtitle-style-button").addEventListener("click", () => void openSubtitleStylePanel());
 $("#close-subtitle-style").addEventListener("click", () => void closeSubtitleStylePanel());
 $("#save-subtitle-style").addEventListener("click", () => void saveSubtitleStyle());

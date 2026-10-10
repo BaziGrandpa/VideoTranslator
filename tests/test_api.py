@@ -595,17 +595,17 @@ def test_exact_preview_returns_ffmpeg_frame(tmp_path: Path, monkeypatch) -> None
             }
         ],
     )
-    segment = repository.list_segments(project["id"])[0]
     captured = {}
 
-    def fake_render(*args):
+    def fake_render(*args, **kwargs):
         captured["args"] = args
+        captured["kwargs"] = kwargs
         return b"\x89PNG\r\n\x1a\npreview"
 
     monkeypatch.setattr(main_module, "render_exact_preview", fake_render)
     response = TestClient(main_module.app).post(
         f"/api/projects/{project['id']}/exact-preview",
-        json={"segment_id": segment["id"], "timestamp_ms": 1500},
+        json={"timestamp_ms": 3000},
     )
 
     assert response.status_code == 200
@@ -613,7 +613,9 @@ def test_exact_preview_returns_ffmpeg_frame(tmp_path: Path, monkeypatch) -> None
     assert response.headers["cache-control"] == "no-store"
     assert response.content.startswith(b"\x89PNG")
     assert captured["args"][0] == project["id"]
-    assert captured["args"][3] == 1500
+    assert captured["args"][3] == 3000
+    assert len(captured["args"][2]) == 1
+    assert captured["kwargs"]["cards"] == []
 
 
 def test_final_render_locks_project_edits_and_exact_preview(tmp_path: Path, monkeypatch) -> None:

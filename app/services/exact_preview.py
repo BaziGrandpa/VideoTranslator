@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from app.cards.render import append_card_filters, prepare_card_images
 from app.config import command_available, settings
 from app.services.renderer import build_filter_graph, probe_video, write_styled_ass
 
@@ -74,10 +75,11 @@ preview_processes = PreviewProcessRegistry()
 def render_exact_preview(
     project_id: str,
     video_path: Path,
-    segment: dict[str, Any],
+    segments: list[dict[str, Any]] | dict[str, Any],
     timestamp_ms: int,
     bilingual: bool,
     subtitle_style: dict[str, Any] | None,
+    cards: list[dict[str, Any]] | None = None,
 ) -> bytes:
     if not command_available(settings.ffmpeg_bin):
         raise RuntimeError("FFmpeg was not found")
@@ -89,15 +91,31 @@ def render_exact_preview(
         with tempfile.TemporaryDirectory(prefix="video-translator-preview-") as temp_name:
             temp_dir = Path(temp_name)
             ass_path = temp_dir / "bilingual.ass"
-            preview_segment = {
-                **segment,
-                "start_ms": 0,
-                "end_ms": 86_400_000,
-            }
-            style = write_styled_ass(ass_path, [preview_segment], bilingual, subtitle_style)
+            available = [segments] if isinstance(segments, dict) else segments
+            active = [
+                segment for segment in available
+                if int(segment["start_ms"]) <= timestamp_ms < int(segment["end_ms"])
+            ]
+            preview_segments = [
+                {**segment, "start_ms": 0, "end_ms": 86_400_000}
+                for segment in active
+            ]
+            style = write_styled_ass(ass_path, preview_segments, bilingual, subtitle_style)
             width, height = probe_video(video_path)
+            visible_cards = [
+                card for card in (cards or [])
+                if int(card["start_ms"]) <= timestamp_ms < int(card["end_ms"])
+            ]
+            prepared_cards = prepare_card_images(
+                temp_dir, visible_cards, width, height, timestamp_ms
+            )
             filter_script = temp_dir / "filter.ffscript"
-            filter_script.write_text(build_filter_graph(width, height, style), encoding="utf-8")
+            filter_script.write_text(
+                append_card_filters(
+                    build_filter_graph(width, height, style), prepared_cards, exact_frame=True
+                ),
+                encoding="utf-8",
+            )
             output_path = temp_dir / "exact-preview.png"
             command = [
                 settings.ffmpeg_bin,
@@ -108,6 +126,11 @@ def render_exact_preview(
                 f"{max(0, timestamp_ms) / 1000:.3f}",
                 "-i",
                 str(video_path),
+                *[
+                    argument
+                    for item in prepared_cards
+                    for argument in ("-loop", "1", "-i", str(item["path"]))
+                ],
                 "-/filter_complex",
                 str(filter_script),
                 "-map",

@@ -22,6 +22,23 @@ A local-first workbench for translating and burning subtitles into YouTube video
 11. Review both languages and adjust subtitle timing in the browser.
 12. Confirm the timeline, then use FFmpeg to add gradient masks and burn styled ASS subtitles.
 
+## Manual commentary cards
+
+Each project has a separate **Commentary cards** workspace beside Subtitle review. Add a card at
+the player's current time, then edit its Chinese term, English name, explanation, start/end times,
+fade durations, left/right position, width, font, text colors and sizes, padding, and translucent
+background. Cards appear in the upper-left or upper-right of the actual video picture. The initial
+position is right and width is 32% of the video; the most recently saved card style becomes the
+default for new cards across projects. Fade-in and fade-out default to 0.8 seconds each. Cards
+cannot overlap, and text that would exceed the safe picture area is rejected with an explanation
+instead of being cut off.
+
+The player shows cards while video plays. **Preview** renders the selected video time with FFmpeg,
+including whichever subtitles and cards are active at that instant; no subtitle selection is
+required. The card editor can preview unsaved style changes. Saving a card marks an existing final
+video as outdated. **Render new version** burns both subtitles and cards into the next numbered
+video file. Cards remain in the project when subtitles are rebuilt and never trigger translation.
+
 Pass 2 Chinese punctuation is retained in SQLite and in editable subtitle text. The browser
 preview, exact preview, ASS render, and exported Chinese SRT remove trailing commas and periods
 from displayed Segments. Length and reading-speed checks use this displayed text.

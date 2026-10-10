@@ -18,6 +18,9 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from app.cards.api import create_router as create_card_router
+from app.cards.model import CardPayload
+from app.cards.repository import CardRepository
 from app.config import command_available, settings
 from app.db import init_db, transaction
 from app.repository import Repository
@@ -44,6 +47,15 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Video Translator", version="0.1.0", lifespan=lifespan)
 repository = Repository()
+app.include_router(create_card_router(lambda: repository))
+
+
+@app.middleware("http")
+async def prevent_stale_static_assets(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.middleware("http")
@@ -138,8 +150,9 @@ class TranslationContextUpdate(BaseModel):
 
 
 class ExactPreviewRequest(BaseModel):
-    segment_id: int = Field(ge=1)
     timestamp_ms: int = Field(ge=0)
+    card_id: int | None = Field(default=None, ge=1)
+    card_draft: CardPayload | None = None
 
 
 class SubtitleRebuildRequest(BaseModel):
@@ -366,13 +379,21 @@ def create_project(payload: ProjectCreate) -> dict:
 @app.get("/api/projects/{project_id}")
 def get_project(project_id: str) -> dict:
     project = require_project(project_id)
+    card_repository = CardRepository(repository.database_path)
+    card_state = card_repository.state(project_id)
     project["segment_count"] = len(repository.list_segments(project_id))
     project["token_count"] = len(repository.list_tokens(project_id))
     project["parts"] = repository.list_parts(project_id)
     project["provider_usage"] = repository.provider_usage(project_id)
+    project["card_revision"] = card_state["revision"]
+    project["rendered_card_revision"] = card_state["rendered_revision"]
+    project["card_count"] = len(card_repository.list(project_id))
     project["render_is_stale"] = (
         project["rendered_revision"] is not None
-        and project["rendered_revision"] != project["subtitle_revision"]
+        and (
+            project["rendered_revision"] != project["subtitle_revision"]
+            or card_state["revision"] != card_state["rendered_revision"]
+        )
     )
     return project
 
@@ -645,28 +666,44 @@ def update_subtitle_style(project_id: str, payload: SubtitleStyleUpdate) -> dict
 def exact_preview(project_id: str, payload: ExactPreviewRequest) -> Response:
     project = require_project_not_rendering(project_id)
     video_path = Path(str(project.get("video_path") or ""))
-    if not video_path.exists():
+    if not video_path.is_file():
         raise HTTPException(status_code=409, detail="The project has no downloaded video")
-    segment = repository.get_segment(project_id, payload.segment_id)
-    if segment is None:
-        raise HTTPException(status_code=404, detail="Subtitle not found")
     timestamp_ms = min(
         payload.timestamp_ms,
         max(0, int(project.get("duration_ms") or payload.timestamp_ms + 1) - 1),
     )
+    cards = CardRepository(repository.database_path).list(project_id)
+    if payload.card_draft is not None:
+        draft = payload.card_draft.model_dump()
+        if project.get("duration_ms") and draft["end_ms"] > int(project["duration_ms"]):
+            raise HTTPException(status_code=422, detail="Card ends after the video")
+        if payload.card_id is not None and not any(
+            card["id"] == payload.card_id for card in cards
+        ):
+            raise HTTPException(status_code=404, detail="Card not found")
+        for card in cards:
+            if card["id"] != payload.card_id and (
+                draft["start_ms"] < card["end_ms"] and draft["end_ms"] > card["start_ms"]
+            ):
+                raise HTTPException(status_code=422, detail="Cards cannot overlap")
+        cards = [card for card in cards if card["id"] != payload.card_id]
+        cards.append(draft)
     try:
         content = render_exact_preview(
             project_id,
             video_path,
-            segment,
+            repository.list_segments(project_id),
             timestamp_ms,
             bool(project["bilingual"]),
             project["subtitle_style"],
+            cards=cards,
         )
     except PreviewCancelled as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
     return Response(
         content=content,
         media_type="image/png",

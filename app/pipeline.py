@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from app.cards.repository import CardRepository
 from app.config import settings
 from app.repository import Repository
 from app.services.caption_tokens import reconstruct_vtt_tokens
@@ -856,6 +857,7 @@ class Pipeline:
         if not project.get("video_path"):
             raise RuntimeError("The project has no downloaded video")
         segments = self.repository.list_segments(project_id)
+        cards = CardRepository(self.repository.database_path).list(project_id)
         self.repository.update_project(
             project_id,
             status="running",
@@ -874,6 +876,7 @@ class Pipeline:
                 project_id, progress=max(5, min(99, value))
             ),
             subtitle_style=project["subtitle_style"],
+            cards=cards,
         )
         latest = self.repository.get_project(project_id)
         assert latest is not None
@@ -887,6 +890,7 @@ class Pipeline:
             rendered_revision=latest["subtitle_revision"],
             error=None,
         )
+        CardRepository(self.repository.database_path).mark_rendered(project_id)
 
 
 

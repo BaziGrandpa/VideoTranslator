@@ -6,6 +6,7 @@
     <title>Video Translator</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2216%22 fill=%22%2338d39f%22/><text x=%2232%22 y=%2241%22 text-anchor=%22middle%22 font-size=%2228%22 font-family=%22Arial%22 font-weight=%22700%22 fill=%22%2306251b%22>VT</text></svg>" />
     <link rel="stylesheet" href="/static/styles.css?v=20260926-project-delete" />
+    <link rel="stylesheet" href="/static/cards.css?v=20261009-cards" />
   </head>
   <body>
     <div class="app-shell">
@@ -109,7 +110,7 @@
             <div class="player-column">
               <div class="video-stage">
                 <video id="video" controls preload="metadata"></video>
-                <img id="exact-preview-image" class="exact-preview-image hidden" alt="Exact FFmpeg subtitle preview" title="Click the left or right half to move between subtitles" />
+                <img id="exact-preview-image" class="exact-preview-image hidden" alt="Exact FFmpeg frame preview" title="Click left or right to step 0.1 seconds" />
                 <div id="exact-preview-badge" class="exact-preview-badge hidden"></div>
                 <div id="exact-preview-loading" class="exact-preview-loading hidden"></div>
                 <div class="bottom-mask"></div>
@@ -117,10 +118,16 @@
                   <div id="preview-cn" class="preview-cn"></div>
                   <div id="preview-en" class="preview-en"></div>
                 </div>
+                <img id="card-overlay" class="card-overlay hidden" alt="" />
               </div>
 
               <div class="timing-panel">
                 <div class="timing-row">
+                  <button id="exact-preview-button" type="button">Preview</button>
+                  <label class="exact-time-control">Time (seconds)
+                    <input id="exact-preview-time" type="number" min="0" step="0.1" value="0" />
+                  </label>
+                  <button id="exact-preview-refresh" type="button">Show frame</button>
                   <button id="scroll-to-active">Scroll to current subtitle</button>
                   <label class="loop-control"><input id="loop-current" type="checkbox" /> Loop selected subtitle</label>
                   <span id="save-state" class="save-state">Saved</span>
@@ -129,6 +136,11 @@
             </div>
 
             <div class="subtitle-column">
+              <div class="workspace-tabs" role="tablist" aria-label="Project workspaces">
+                <button id="subtitle-tab" type="button" class="active" role="tab" aria-selected="true">Subtitle review</button>
+                <button id="cards-tab" type="button" role="tab" aria-selected="false">Commentary cards <span id="cards-tab-count"></span></button>
+              </div>
+              <div id="subtitle-pane">
               <div class="subtitle-toolbar">
                 <div>
                   <strong>Subtitle review</strong>
@@ -138,7 +150,6 @@
                   <button id="review-suggestions" class="hidden">Review suggestions</button>
                   <div class="preview-style-actions">
                     <button id="subtitle-style-button">Subtitle style</button>
-                    <button id="exact-preview-button">Preview</button>
                   </div>
                   <button id="rebuild-subtitles">Rebuild subtitles</button>
                   <button id="approve-render" class="primary">Approve all and render</button>
@@ -182,6 +193,60 @@
                 <span>Timing</span><span>English / Translation</span><span>Reviewed</span>
               </div>
               <div id="segment-list" class="segment-list"></div>
+              </div>
+              <section id="cards-workspace" class="cards-workspace hidden" aria-label="Commentary cards">
+                <div class="cards-toolbar">
+                  <div><strong>Commentary cards</strong><span class="muted">Manual video timeline</span></div>
+                  <div class="cards-toolbar-actions">
+                    <span id="card-render-status" class="muted"></span>
+                    <button id="card-add" type="button">Add card at current time</button>
+                    <button id="cards-render" type="button" class="primary">Render new version</button>
+                  </div>
+                </div>
+                <div id="card-list" class="card-list"></div>
+                <div id="card-editor" class="card-editor hidden">
+                  <div class="card-editor-head">
+                    <strong id="card-editor-title">Card</strong>
+                    <button id="card-delete" type="button" class="danger">Delete</button>
+                  </div>
+                  <div class="card-field-grid">
+                    <label>Start (seconds)<input id="card-start" type="number" min="0" step="0.1" /></label>
+                    <label>End (seconds)<input id="card-end" type="number" min="0" step="0.1" /></label>
+                    <label>Fade in (seconds)<input id="card-fade-in" type="number" min="0" max="5" step="0.1" /></label>
+                    <label>Fade out (seconds)<input id="card-fade-out" type="number" min="0" max="5" step="0.1" /></label>
+                  </div>
+                  <label>Chinese term<input id="card-chinese" type="text" maxlength="160" /></label>
+                  <label>English name<input id="card-english" type="text" maxlength="240" /></label>
+                  <label>Explanation<textarea id="card-explanation" rows="5" maxlength="1200"></textarea></label>
+                  <details class="card-style-settings" open>
+                    <summary>Card style</summary>
+                    <div class="card-field-grid">
+                      <label>Position<select id="card-side"><option value="right">Right</option><option value="left">Left</option></select></label>
+                      <label>Width (% of video)<input id="card-width" type="number" min="20" max="50" step="1" /></label>
+                      <label>Font<select id="card-font"><option>Microsoft YaHei</option><option>Arial</option><option>SimHei</option></select></label>
+                      <label>Chinese size<input id="card-title-size" type="number" min="20" max="100" /></label>
+                      <label>Chinese color<input id="card-title-color" type="color" /></label>
+                      <label>English size<input id="card-english-size" type="number" min="18" max="80" /></label>
+                      <label>English color<input id="card-english-color" type="color" /></label>
+                      <label>Explanation size<input id="card-body-size" type="number" min="18" max="80" /></label>
+                      <label>Explanation color<input id="card-body-color" type="color" /></label>
+                      <label>Line spacing<input id="card-line-spacing" type="number" min="1" max="2" step="0.05" /></label>
+                      <label>Inner padding<input id="card-padding" type="number" min="12" max="70" /></label>
+                      <label>Background opacity (%)<input id="card-bg-opacity" type="number" min="20" max="90" /></label>
+                    </div>
+                    <div class="card-bold-controls">
+                      <label><input id="card-title-bold" type="checkbox" /> Chinese bold</label>
+                      <label><input id="card-english-bold" type="checkbox" /> English bold</label>
+                      <label><input id="card-body-bold" type="checkbox" /> Explanation bold</label>
+                    </div>
+                  </details>
+                  <div id="card-validation" class="card-validation hidden"></div>
+                  <div class="card-editor-actions">
+                    <span id="card-save-state" class="muted">Saved</span>
+                    <button id="card-save" type="button" class="primary">Save card</button>
+                  </div>
+                </div>
+              </section>
             </div>
           </section>
         </section>
@@ -307,6 +372,7 @@
     </dialog>
 
     <div id="toast" class="toast hidden"></div>
-    <script src="/static/app.js?v=20261005-project-reconnect" defer></script>
+    <script src="/static/app.js?v=20261010-workspace-ready" defer></script>
+    <script src="/static/cards.js?v=20261010-card-position" defer></script>
   </body>
 </html>

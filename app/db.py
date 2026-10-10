@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from app.cards.schema import SCHEMA as CARD_SCHEMA
 from app.config import settings
 
 SCHEMA = """
@@ -135,6 +136,7 @@ def connect(database_path: Path | None = None) -> sqlite3.Connection:
 def init_db(database_path: Path | None = None) -> None:
     with connect(database_path) as connection:
         connection.executescript(SCHEMA)
+        connection.executescript(CARD_SCHEMA)
 
 
 @contextmanager
