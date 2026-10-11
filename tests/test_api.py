@@ -41,6 +41,13 @@ def test_create_project_and_edit_segment(tmp_path: Path, monkeypatch) -> None:
     assert edited.status_code == 200
     assert edited.json()["start_ms"] == 1100
     assert edited.json()["target_text"] == "Edited translation"
+    boosted = client.patch(
+        f"/api/projects/{project_id}/segments/{segment['id']}",
+        json={"extra_line_gap": True},
+    )
+    assert boosted.status_code == 200
+    assert boosted.json()["extra_line_gap"] is True
+    assert client.get(f"/api/projects/{project_id}/segments").json()[0]["extra_line_gap"] is True
 
 
 def test_timing_updates_share_neighbor_boundaries_and_reject_zero_duration(

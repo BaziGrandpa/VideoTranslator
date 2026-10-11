@@ -102,7 +102,8 @@
       ["title-bold", "title_bold"], ["english-bold", "english_bold"],
       ["body-bold", "body_bold"],
     ]) field(input).checked = style[key];
-    field("editor-title").textContent = isNew ? "New card" : `Card ${selectedId}`;
+    const position = cards.findIndex((item) => item.id === selectedId);
+    field("editor-title").textContent = isNew ? "New card" : `Card ${position + 1} of ${cards.length}`;
     field("delete").textContent = isNew ? "Discard" : "Delete";
     field("editor").classList.remove("hidden");
     setStatus(isNew ? "Unsaved new card" : "Saved");
@@ -244,7 +245,7 @@
     isNew = true;
     dirty = true;
     fill({
-      start_ms: start, end_ms: Math.min(duration, start + 10000),
+      start_ms: start, end_ms: Math.min(duration, start + 5000),
       chinese_term: "", english_term: "", explanation: "", style,
     });
     field("chinese").focus();

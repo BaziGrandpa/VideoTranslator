@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS segments (
     part_id INTEGER REFERENCES parts(id),
     source_text TEXT NOT NULL, target_text TEXT NOT NULL,
     quality_flags TEXT NOT NULL DEFAULT '[]',
+    extra_line_gap INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'machine_translated',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at TEXT NOT NULL,
@@ -137,6 +138,19 @@ def init_db(database_path: Path | None = None) -> None:
     with connect(database_path) as connection:
         connection.executescript(SCHEMA)
         connection.executescript(CARD_SCHEMA)
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            segment_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(segments)")
+            }
+            if "extra_line_gap" not in segment_columns:
+                connection.execute(
+                    "ALTER TABLE segments ADD COLUMN extra_line_gap INTEGER NOT NULL DEFAULT 0"
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
 
 
 @contextmanager

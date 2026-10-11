@@ -397,6 +397,7 @@ class Repository:
     @staticmethod
     def _decode_segment(row: sqlite3.Row) -> dict[str, Any]:
         segment = dict(row)
+        segment["extra_line_gap"] = bool(segment.get("extra_line_gap", 0))
         try:
             segment["quality_flags"] = json.loads(segment.get("quality_flags") or "[]")
         except json.JSONDecodeError:
@@ -806,8 +807,10 @@ class Repository:
             )
 
     def update_segment(self, project_id: str, segment_id: int, **fields: Any) -> dict[str, Any]:
-        allowed = {"start_ms", "end_ms", "source_text", "target_text", "status"}
+        allowed = {"start_ms", "end_ms", "source_text", "target_text", "status", "extra_line_gap"}
         values = {key: value for key, value in fields.items() if key in allowed}
+        if "extra_line_gap" in values:
+            values["extra_line_gap"] = int(bool(values["extra_line_gap"]))
         if "source_text" in values:
             values["source_text"] = normalize_segment_texts(str(values["source_text"]), "")[0]
         if "target_text" in values:
@@ -958,8 +961,8 @@ class Repository:
                 """
                 INSERT INTO segments (
                     project_id, segment_order, start_ms, end_ms, source_text,
-                    target_text, status, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'edited', ?)
+                    target_text, extra_line_gap, status, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'edited', ?)
                 """,
                 (
                     project_id,
@@ -968,6 +971,7 @@ class Repository:
                     row["end_ms"],
                     source_right,
                     translated_right,
+                    row["extra_line_gap"],
                     now_iso(),
                 ),
             )
@@ -1007,7 +1011,7 @@ class Repository:
                 """
                 UPDATE segments SET end_ms = ?, end_token_id = ?,
                     source_text = ?, target_text = ?,
-                    status = 'edited', updated_at = ? WHERE id = ?
+                    extra_line_gap = ?, status = 'edited', updated_at = ? WHERE id = ?
                 """,
                 (
                     following["end_ms"],
@@ -1020,6 +1024,7 @@ class Repository:
                         f"{current['source_text']} {following['source_text']}",
                         f"{current['target_text']}{following['target_text']}",
                     )[1],
+                    int(bool(current["extra_line_gap"] or following["extra_line_gap"])),
                     now_iso(),
                     current["id"],
                 ),

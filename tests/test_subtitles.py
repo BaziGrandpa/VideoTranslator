@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from app.services.caption_tokens import reconstruct_vtt_tokens
+from app.services.renderer import write_styled_ass
 from app.services.subtitle_text import (
     display_target_text,
     normalize_source_text,
@@ -86,6 +87,25 @@ def test_write_ass_contains_bilingual_events(tmp_path: Path) -> None:
     assert "Style: Chinese,Microsoft YaHei" in content
     assert ",Chinese,,0,0,0,,Hello translated" in content
     assert ",English,,0,0,0,,Hello" in content
+
+
+def test_extra_line_gap_applies_only_to_checked_segment(tmp_path: Path) -> None:
+    path = tmp_path / "subtitles.ass"
+    write_ass(path, [
+        {"start_ms": 0, "end_ms": 1000, "source_text": "First", "target_text": "第一", "extra_line_gap": True},
+        {"start_ms": 1000, "end_ms": 2000, "source_text": "Second", "target_text": "第二", "extra_line_gap": False},
+    ], chinese_margin=80, english_margin=30)
+    content = path.read_text(encoding="utf-8-sig")
+    assert "Dialogue: 1,0:00:00.00,0:00:01.00,Chinese,,0,0,110,,第一" in content
+    assert "Dialogue: 1,0:00:01.00,0:00:02.00,Chinese,,0,0,0,,第二" in content
+    assert ",English,,0,0,0,,First" in content
+    assert ",English,,0,0,0,,Second" in content
+
+    changed_style = tmp_path / "changed-style.ass"
+    write_styled_ass(changed_style, [
+        {"start_ms": 0, "end_ms": 1000, "source_text": "First", "target_text": "第一", "extra_line_gap": True},
+    ], True, {"layout": {"bottom_margin": 30, "line_gap": 60}})
+    assert ",Chinese,,0,0,120,,第一" in changed_style.read_text(encoding="utf-8-sig")
 
 
 def test_ass_and_srt_hide_terminal_marks_without_changing_input(tmp_path: Path) -> None:

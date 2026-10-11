@@ -10,6 +10,9 @@ TIMESTAMP_RE = re.compile(
     r"(?P<start>\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3})\s+-->\s+"
     r"(?P<end>\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3})"
 )
+EXTRA_LINE_GAP = 30
+
+
 def timestamp_to_ms(value: str) -> int:
     normalized = value.replace(",", ".")
     parts = normalized.split(":")
@@ -134,7 +137,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         start = ms_to_ass(segment["start_ms"])
         end = ms_to_ass(segment["end_ms"])
         translated = ass_escape(display_target_text(str(segment["target_text"])))
-        events.append(f"Dialogue: 1,{start},{end},Chinese,,0,0,0,,{translated}")
+        chinese_event_margin = (
+            chinese_margin + EXTRA_LINE_GAP
+            if segment.get("extra_line_gap") and bilingual
+            else 0
+        )
+        events.append(
+            f"Dialogue: 1,{start},{end},Chinese,,0,0,{chinese_event_margin},,{translated}"
+        )
         if bilingual:
             source = ass_escape(normalize_source_text(str(segment["source_text"])))
             events.append(f"Dialogue: 1,{start},{end},English,,0,0,0,,{source}")

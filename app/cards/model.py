@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class CardStyle(BaseModel):
-    side: Literal["left", "right"] = "right"
+    side: Literal["left", "center", "right"] = "right"
     width_pct: float = Field(default=32, ge=20, le=50)
     font_family: Literal["Microsoft YaHei", "Arial", "SimHei"] = "Microsoft YaHei"
     title_size: int = Field(default=54, ge=20, le=100)

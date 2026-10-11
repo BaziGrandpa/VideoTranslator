@@ -1,7 +1,7 @@
 import sqlite3
 from pathlib import Path
 
-from app.db import init_db
+from app.db import SCHEMA, init_db
 from app.repository import Repository
 
 
@@ -55,9 +55,11 @@ def test_segment_edit_split_and_merge(tmp_path: Path) -> None:
     segments = repository.list_segments(project["id"])
 
     updated = repository.update_segment(
-        project["id"], segments[0]["id"], target_text="Edited first.", status="edited"
+        project["id"], segments[0]["id"], target_text="Edited first.",
+        extra_line_gap=True, status="edited"
     )
     assert updated["target_text"] == "Edited first."
+    assert updated["extra_line_gap"] is True
 
     repository.split_segment(project["id"], segments[0]["id"], 500)
     split = repository.list_segments(project["id"])
@@ -65,12 +67,26 @@ def test_segment_edit_split_and_merge(tmp_path: Path) -> None:
     assert [item["segment_order"] for item in split] == [1, 2, 3, 4]
     assert split[0]["end_ms"] == 500
     assert split[1]["start_ms"] == 500
+    assert split[0]["extra_line_gap"] is True
+    assert split[1]["extra_line_gap"] is True
 
     repository.merge_with_next(project["id"], split[0]["id"])
     merged = repository.list_segments(project["id"])
     assert len(merged) == 3
     assert [item["segment_order"] for item in merged] == [1, 2, 3]
     assert merged[0]["end_ms"] == 1000
+    assert merged[0]["extra_line_gap"] is True
+
+
+def test_init_db_adds_extra_line_gap_to_existing_database(tmp_path: Path) -> None:
+    database = tmp_path / "legacy.db"
+    legacy_schema = SCHEMA.replace("    extra_line_gap INTEGER NOT NULL DEFAULT 0,\n", "")
+    with sqlite3.connect(database) as connection:
+        connection.executescript(legacy_schema)
+    init_db(database)
+    with sqlite3.connect(database) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(segments)")}
+    assert "extra_line_gap" in columns
 
 
 def test_chinese_terminal_punctuation_survives_segment_storage_and_edit(tmp_path: Path) -> None:

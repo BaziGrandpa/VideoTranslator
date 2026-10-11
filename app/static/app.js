@@ -223,9 +223,10 @@ function updateSubtitlePreviewGeometry() {
   const scaleX = renderedWidth / playResX;
   const scaleY = renderedHeight / playResY;
   const bottomMargin = Math.max(0, style.layout.bottom_margin);
+  const activeSegment = state.segments.find((segment) => segment.id === state.activeId);
   const chineseMargin = state.project?.bilingual === false
     ? bottomMargin
-    : bottomMargin + Math.max(0, style.layout.line_gap);
+    : bottomMargin + Math.max(0, style.layout.line_gap) + (activeSegment?.extra_line_gap ? 30 : 0);
   const horizontalMargin = Math.max(0, style.layout.horizontal_margin);
   const maskHeightRatio = Math.min(0.8, Math.max(0.05, style.bottom_mask?.height ?? 0.34));
   const root = document.documentElement;
@@ -926,10 +927,22 @@ function timeFieldsMarkup(segment, showWarning) {
         </label>
       </div>
       ${warning}
+      <label class="extra-line-gap-toggle" title="Add 30 to this subtitle's line gap">
+        <input class="extra-line-gap" type="checkbox" ${segment.extra_line_gap ? "checked" : ""} aria-label="Extra line gap for this subtitle" />
+        <span class="extra-line-gap-track" aria-hidden="true"></span>
+        <span>Line gap +30</span>
+      </label>
     </div>`;
 }
 
 function bindTimingControls(row, id) {
+  row.querySelector(".extra-line-gap-toggle").addEventListener("click", (event) => event.stopPropagation());
+  row.querySelector(".extra-line-gap").addEventListener("change", async (event) => {
+    const toggle = event.target;
+    toggle.disabled = true;
+    const saved = await saveSegment(id, { extra_line_gap: toggle.checked }, true);
+    if (saved && state.exactPreview.open) scheduleExactPreview();
+  });
   row.querySelectorAll(".independent-time-toggle").forEach((toggle) => {
     toggle.addEventListener("click", (event) => event.stopPropagation());
   });
@@ -1176,6 +1189,7 @@ function updatePreview() {
     preview.classList.add("hidden");
     return;
   }
+  updateSubtitlePreviewGeometry();
   $("#preview-cn").textContent = active.target_text.replace(
     /[，。,.—–―⸺⸻]+(?=\s*["'”’》」』】）)]*\s*$)/u,
     "",

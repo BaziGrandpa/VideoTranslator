@@ -137,8 +137,14 @@ def render_card_image(
         alpha = image.getchannel("A").point(lambda value: round(value * opacity))
         image.putalpha(alpha)
     side_margin = round(video_width * SIDE_MARGIN_RATIO)
+    if style.side == "left":
+        x = side_margin
+    elif style.side == "center":
+        x = (video_width - width) // 2
+    else:
+        x = video_width - side_margin - width
     return image, {
-        "x": side_margin if style.side == "left" else video_width - side_margin - width,
+        "x": x,
         "y": round(video_height * TOP_MARGIN_RATIO),
         "width": width,
         "height": height,

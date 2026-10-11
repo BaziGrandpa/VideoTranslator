@@ -97,12 +97,16 @@ def test_card_text_wraps_and_rejects_unsafe_height() -> None:
 def test_card_side_defaults_right_and_mirrors_in_video_coordinates() -> None:
     right = CardPayload.model_validate(sample_card())
     left = CardPayload.model_validate({**sample_card(), "style": {"side": "left"}})
+    center = CardPayload.model_validate({**sample_card(), "style": {"side": "center"}})
     _, right_geometry = render_card_image(right, 640, 360)
     _, left_geometry = render_card_image(left, 640, 360)
+    _, center_geometry = render_card_image(center, 640, 360)
     assert right.style.side == "right"
     assert left_geometry["x"] == 26
     assert right_geometry["x"] == 640 - 26 - right_geometry["width"]
     assert left_geometry["width"] == right_geometry["width"]
+    assert center_geometry["x"] == (640 - center_geometry["width"]) // 2
+    assert center_geometry["y"] == right_geometry["y"]
 
 
 @pytest.mark.skipif(not command_available(settings.ffmpeg_bin), reason="FFmpeg unavailable")
@@ -159,7 +163,7 @@ def test_cards_are_independent_and_work_on_existing_project(tmp_path: Path, monk
 
 
 @pytest.mark.skipif(not command_available(settings.ffmpeg_bin), reason="FFmpeg unavailable")
-@pytest.mark.parametrize("side", ["left", "right"])
+@pytest.mark.parametrize("side", ["left", "center", "right"])
 def test_card_exact_preview_and_final_render_share_visual(tmp_path: Path, side: str) -> None:
     video = tmp_path / "source.mp4"
     make_video(video)

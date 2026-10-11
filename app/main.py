@@ -90,6 +90,7 @@ class SegmentUpdate(BaseModel):
     source_text: str | None = None
     target_text: str | None = None
     status: str | None = None
+    extra_line_gap: bool | None = None
 
 
 class SegmentTimingUpdate(BaseModel):
