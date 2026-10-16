@@ -6,8 +6,9 @@ import time
 
 from app.config import settings
 from app.db import init_db
-from app.pipeline import Pipeline
+from app.pipeline import NoUsableSubtitlesError, Pipeline
 from app.repository import Repository
+from app.services.renderer import RenderCancelled
 from app.services.subtitle_planner import TranslationQuotaError
 
 logging.basicConfig(
@@ -51,6 +52,15 @@ def run_worker(once: bool = False, poll_seconds: float = 1.0) -> None:
             else:
                 raise RuntimeError(f"Unknown job kind: {job['kind']}")
             repository.complete_job(job["id"])
+        except RenderCancelled:
+            logger.info("Render cancelled for project %s", job["project_id"])
+            repository.cancel_render_job(job["id"])
+        except NoUsableSubtitlesError as exc:
+            logger.warning("Project has no usable subtitles: %s", exc)
+            repository.fail_job(job["id"], str(exc))
+            repository.update_project(
+                job["project_id"], status="failed", stage="no_subtitles", error=str(exc)
+            )
         except TranslationQuotaError as exc:
             logger.warning("Translation paused for quota: %s", exc)
             if job["kind"] == "part_rebuild":

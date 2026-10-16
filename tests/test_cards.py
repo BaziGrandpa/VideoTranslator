@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from PIL import Image, ImageChops
 
 import app.main as main_module
+from app.cards import api as cards_api
 from app.cards.model import CardPayload
 from app.cards.repository import CardRepository
 from app.cards.visual import _font, _wrap, render_card_image
@@ -38,6 +39,46 @@ def make_video(path: Path) -> None:
         check=False, capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("stage", ["render_queued", "rendering", "render_cancelling"])
+def test_card_mutations_locked_until_render_finishes(tmp_path: Path, monkeypatch, stage: str) -> None:
+    database = tmp_path / "cards.db"
+    init_db(database)
+    repository = Repository(database)
+    project = repository.create_project("https://youtu.be/example")
+    project_id = project["id"]
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"placeholder")
+    repository.update_project(
+        project_id, video_path=str(video), duration_ms=10_000, status="running", stage=stage,
+    )
+    cards = CardRepository(database)
+    card = cards.create(project_id, CardPayload.model_validate(sample_card()))
+    before = cards.list(project_id)
+    monkeypatch.setattr(main_module, "repository", repository)
+    monkeypatch.setattr(cards_api, "probe_video", lambda _path: (640, 360))
+    monkeypatch.setattr(cards_api, "render_card_png", lambda *_args: (b"image", {}))
+    client = TestClient(main_module.app)
+    route = f"/api/projects/{project_id}/cards"
+    updated = {**sample_card(), "explanation": "Updated explanation"}
+
+    assert client.post(route, json=sample_card(4000, 6500)).status_code == 409
+    assert client.put(f"{route}/{card['id']}", json=updated).status_code == 409
+    assert client.delete(f"{route}/{card['id']}").status_code == 409
+    assert client.get(route).status_code == 200
+    assert cards.list(project_id) == before
+    with connect(database) as connection:
+        assert connection.execute(
+            "SELECT revision FROM commentary_card_render_state WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()[0] == 1
+
+    repository.update_project(project_id, status="waiting_review", stage="waiting_review")
+    assert client.post(route, json=sample_card(4000, 6500)).status_code == 201
+    assert client.put(f"{route}/{card['id']}", json=updated).status_code == 200
+    assert cards.get(project_id, card["id"])["explanation"] == "Updated explanation"
+    assert client.delete(f"{route}/{card['id']}").status_code == 200
 
 
 def test_existing_database_schema_gains_card_tables_without_changing_project(tmp_path: Path) -> None:

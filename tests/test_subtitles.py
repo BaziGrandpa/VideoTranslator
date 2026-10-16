@@ -4,6 +4,7 @@ from app.services.caption_tokens import reconstruct_vtt_tokens
 from app.services.renderer import write_styled_ass
 from app.services.subtitle_text import (
     display_target_text,
+    normalize_manual_target_text,
     normalize_source_text,
     normalize_target_text,
 )
@@ -47,6 +48,12 @@ def test_display_removes_only_terminal_layout_marks() -> None:
     assert display_target_text("他们会看你。然后离开。") == "他们会看你。然后离开"
 
 
+def test_manual_line_breaks_survive_display_normalization() -> None:
+    assert normalize_target_text("第一行。\n第二行。") == "第一行。第二行。"
+    assert normalize_manual_target_text("第一行。\r\n第二行。") == "第一行。\n第二行。"
+    assert display_target_text("第一行。\n第二行。") == "第一行。\n第二行"
+
+
 def test_validate_segments_reports_overlap_and_missing_translation() -> None:
     problems = validate_segments(
         [
@@ -66,6 +73,15 @@ def test_validate_segments_reports_overlap_and_missing_translation() -> None:
     )
     assert any("empty translation" in item for item in problems)
     assert any("overlap" in item for item in problems)
+
+
+def test_chinese_only_allows_empty_english_but_still_needs_chinese() -> None:
+    segment = {"start_ms": 0, "end_ms": 1000, "source_text": "", "target_text": "只有中文。"}
+    assert any("empty source" in item for item in validate_segments([segment]))
+    assert validate_segments([{**segment, "chinese_only": True}]) == []
+    assert any("empty translation" in item for item in validate_segments([
+        {**segment, "chinese_only": True, "target_text": ""}
+    ]))
 
 
 def test_write_ass_contains_bilingual_events(tmp_path: Path) -> None:
@@ -106,6 +122,28 @@ def test_extra_line_gap_applies_only_to_checked_segment(tmp_path: Path) -> None:
         {"start_ms": 0, "end_ms": 1000, "source_text": "First", "target_text": "第一", "extra_line_gap": True},
     ], True, {"layout": {"bottom_margin": 30, "line_gap": 60}})
     assert ",Chinese,,0,0,120,,第一" in changed_style.read_text(encoding="utf-8-sig")
+
+
+def test_chinese_only_and_manual_breaks_reach_ass_and_srt(tmp_path: Path) -> None:
+    segments = [
+        {"start_ms": 0, "end_ms": 1000, "source_text": "", "target_text": "第一行。\n第二行。",
+         "chinese_only": True, "extra_line_gap": True},
+        {"start_ms": 1000, "end_ms": 2000, "source_text": "Second", "target_text": "第二。"},
+    ]
+    ass_path = tmp_path / "subtitles.ass"
+    write_ass(ass_path, segments, chinese_margin=80, english_margin=30)
+    ass = ass_path.read_text(encoding="utf-8-sig")
+    assert "Dialogue: 1,0:00:00.00,0:00:01.00,Chinese,,0,0,30,,第一行。\\N第二行" in ass
+    assert "Dialogue: 1,0:00:01.00,0:00:02.00,Chinese,,0,0,0,,第二" in ass
+    assert ",English,,0,0,0,,Second" in ass
+    assert ass.count(",English,,") == 1
+
+    english_path = tmp_path / "english.srt"
+    chinese_path = tmp_path / "chinese.srt"
+    write_srt(english_path, segments, "source_text")
+    write_srt(chinese_path, segments, "target_text")
+    assert english_path.read_text(encoding="utf-8-sig").startswith("1\n00:00:01,000")
+    assert "第一行。\n第二行" in chinese_path.read_text(encoding="utf-8-sig")
 
 
 def test_ass_and_srt_hide_terminal_marks_without_changing_input(tmp_path: Path) -> None:

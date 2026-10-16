@@ -30,7 +30,12 @@ from app.services.exact_preview import (
     preview_processes,
     render_exact_preview,
 )
-from app.services.subtitle_quality import describe_review_problems, segment_review_problems
+from app.services.subtitle_quality import (
+    AUDIO_EFFECT_BOUNDARY,
+    audio_effect_boundary_segment_ids,
+    describe_review_problems,
+    segment_review_problems,
+)
 from app.services.subtitle_style import merge_subtitle_style
 from app.services.subtitles import validate_segments
 
@@ -91,6 +96,11 @@ class SegmentUpdate(BaseModel):
     target_text: str | None = None
     status: str | None = None
     extra_line_gap: bool | None = None
+    chinese_only: bool | None = None
+
+
+class ResumeTimeUpdate(BaseModel):
+    time_ms: int = Field(ge=0)
 
 
 class SegmentTimingUpdate(BaseModel):
@@ -98,10 +108,6 @@ class SegmentTimingUpdate(BaseModel):
     value_ms: int | None = Field(default=None, ge=0)
     delta_ms: Literal[-100, 100] | None = None
     sync_neighbor: bool = True
-
-
-class SplitRequest(BaseModel):
-    at_ms: int = Field(ge=0)
 
 
 class SubtitleStyleUpdate(BaseModel):
@@ -179,7 +185,7 @@ def require_project(project_id: str) -> dict:
 
 
 def project_is_rendering(project: dict) -> bool:
-    return project.get("stage") in {"render_queued", "rendering"}
+    return project.get("stage") in {"render_queued", "rendering", "render_cancelling"}
 
 
 def require_project_not_rendering(project_id: str) -> dict:
@@ -234,10 +240,62 @@ def require_translation_context_review(project_id: str) -> dict:
     return project
 
 
-def _part_has_exact_token_coverage(part: dict, segments: list[dict]) -> bool:
+def _part_has_rebuildable_segments(
+    part: dict,
+    segments: list[dict],
+    cues: list[dict],
+    component_ranges: dict[int, list[tuple[int, int]]],
+) -> bool:
+    part_id = int(part["id"])
     part_segments = [
-        segment for segment in segments if int(segment.get("part_id") or -1) == int(part["id"])
+        segment for segment in segments
+        if segment.get("part_id") == part_id
+        or any(component["part_id"] == part_id for component in segment.get("components", []))
     ]
+    if not part_segments or any(
+        segment.get("part_id") != part_id
+        or not segment.get("components")
+        or any(component["part_id"] != part_id for component in segment["components"])
+        for segment in part_segments
+    ):
+        return False
+    manual_segments = [
+        segment for segment in part_segments
+        if segment.get("start_token_id") is None or segment.get("end_token_id") is None
+    ]
+    if manual_segments:
+        if any(
+            segment.get("start_token_id") is not None
+            or segment.get("end_token_id") is not None
+            or segment.get("status") != "edited"
+            for segment in manual_segments
+        ):
+            return False
+        # Hand-edited Segments have coarse Cue provenance. Rebuild from the untouched Cues.
+        expected = int(part["start_token_id"])
+        for cue in sorted(cues, key=lambda item: int(item["start_token_id"])):
+            start, end = int(cue["start_token_id"]), int(cue["end_token_id"])
+            if start != expected or end < start:
+                return False
+            expected = end + 1
+        if not cues or expected != int(part["end_token_id"]) + 1:
+            return False
+        ranges: list[tuple[int, int]] = []
+        for segment in part_segments:
+            start, end = segment.get("start_token_id"), segment.get("end_token_id")
+            if start is not None and end is not None:
+                ranges.append((int(start), int(end)))
+            else:
+                original_ranges = component_ranges.get(int(segment["id"]), [])
+                if not original_ranges:
+                    return False
+                ranges.extend(original_ranges)
+        expected = int(part["start_token_id"])
+        for start, end in sorted(ranges):
+            if start < int(part["start_token_id"]) or start > expected or end < start:
+                return False
+            expected = max(expected, end + 1)
+        return expected == int(part["end_token_id"]) + 1
     expected = int(part["start_token_id"])
     for segment in part_segments:
         start = segment.get("start_token_id")
@@ -245,7 +303,7 @@ def _part_has_exact_token_coverage(part: dict, segments: list[dict]) -> bool:
         if not isinstance(start, int) or not isinstance(end, int) or start != expected or end < start:
             return False
         expected = end + 1
-    return bool(part_segments) and expected == int(part["end_token_id"]) + 1
+    return expected == int(part["end_token_id"]) + 1
 
 
 def build_part_rebuild_scope(project: dict, requested_part_ids: list[int]) -> dict:
@@ -261,6 +319,7 @@ def build_part_rebuild_scope(project: dict, requested_part_ids: list[int]) -> di
     tokens = repository.list_tokens(str(project["id"]))
     parts = repository.list_parts(str(project["id"]))
     segments = repository.list_segments(str(project["id"]))
+    component_ranges = repository.segment_component_token_ranges(str(project["id"]))
     if not tokens or not parts or not segments:
         raise HTTPException(
             status_code=409,
@@ -286,11 +345,13 @@ def build_part_rebuild_scope(project: dict, requested_part_ids: list[int]) -> di
         part = available.get(part_id)
         if part is None:
             raise HTTPException(status_code=409, detail=f"Part {part_id} is no longer available")
-        if not _part_has_exact_token_coverage(part, segments):
+        if not _part_has_rebuildable_segments(
+            part, segments, repository.list_cues(part_id), component_ranges
+        ):
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    f"Part {int(part['part_number'])} no longer has exact Token coverage. "
+                    f"Part {int(part['part_number'])} has incomplete Cue or Segment provenance. "
                     "Use a full rebuild."
                 ),
             )
@@ -399,6 +460,13 @@ def get_project(project_id: str) -> dict:
     return project
 
 
+@app.put("/api/projects/{project_id}/resume-time")
+def update_resume_time(project_id: str, payload: ResumeTimeUpdate) -> dict[str, int]:
+    require_project(project_id)
+    saved_ms = repository.set_resume_time(project_id, payload.time_ms)
+    return {"time_ms": saved_ms}
+
+
 @app.patch("/api/projects/{project_id}/translation-context")
 def update_translation_context(
     project_id: str, payload: TranslationContextUpdate
@@ -478,6 +546,7 @@ def delete_project(project_id: str) -> dict:
             raise HTTPException(
                 status_code=409, detail="Wait for project processing to finish before deleting"
             )
+        preview_processes.cancel(project_id)
         for path in (project_data, project_output):
             if path.exists():
                 if not path.is_dir():
@@ -519,6 +588,11 @@ def update_codex_model(project_id: str, payload: CodexModelUpdate) -> dict:
 @app.post("/api/projects/{project_id}/retry")
 def retry_project(project_id: str) -> dict:
     project = require_project(project_id)
+    if project["stage"] == "no_subtitles":
+        raise HTTPException(
+            status_code=409,
+            detail="No usable subtitles were found; retrying the same source will not help",
+        )
     if project["status"] not in {"failed", "waiting_for_quota"}:
         raise HTTPException(
             status_code=409, detail="Only failed or quota-paused projects can be retried"
@@ -609,8 +683,16 @@ def list_segments(project_id: str) -> list[dict]:
 def list_review_issues(project_id: str) -> list[dict]:
     require_project(project_id)
     result: list[dict] = []
-    for segment in repository.list_segments(project_id):
+    segments = repository.list_segments(project_id)
+    audio_effect_ids = audio_effect_boundary_segment_ids(
+        repository.list_tokens(project_id),
+        segments,
+        repository.segment_component_token_ranges(project_id),
+    )
+    for segment in segments:
         problems = segment_review_problems(segment)
+        if int(segment["id"]) in audio_effect_ids:
+            problems.append({"type": AUDIO_EFFECT_BOUNDARY, "actual": 0, "limit": 0})
         if not problems:
             continue
         result.append(
@@ -623,14 +705,8 @@ def list_review_issues(project_id: str) -> list[dict]:
                 "end_token_id": segment.get("end_token_id"),
             }
         )
-    return sorted(
-        result,
-        key=lambda issue: (
-            issue["start_token_id"] if issue["start_token_id"] is not None else 10**12,
-            issue["end_token_id"] if issue["end_token_id"] is not None else 10**12,
-            issue["id"],
-        ),
-    )
+    start_by_segment = {int(segment["id"]): int(segment["start_ms"]) for segment in segments}
+    return sorted(result, key=lambda issue: (start_by_segment[issue["segment_id"]], issue["segment_id"]))
 
 
 @app.patch("/api/projects/{project_id}/subtitle-style")
@@ -771,15 +847,15 @@ def update_segment_timing(
 
 
 @app.post("/api/projects/{project_id}/segments/{segment_id}/split")
-def split_segment(project_id: str, segment_id: int, payload: SplitRequest) -> dict:
+def split_segment(project_id: str, segment_id: int) -> dict:
     require_project_not_rendering(project_id)
     try:
-        repository.split_segment(project_id, segment_id, payload.at_ms)
+        new_segment_id = repository.split_segment(project_id, segment_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Subtitle not found") from None
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
-    return {"ok": True}
+    return {"ok": True, "new_segment_id": new_segment_id}
 
 
 @app.post("/api/projects/{project_id}/segments/{segment_id}/merge-next")
@@ -821,6 +897,16 @@ def approve_and_render(project_id: str) -> dict:
     return repository.enqueue_job(
         project_id, "render", return_status=project["status"]
     )
+
+
+@app.post("/api/projects/{project_id}/cancel-render")
+def cancel_render(project_id: str) -> dict:
+    require_project(project_id)
+    try:
+        status = repository.request_render_cancel(project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return {"status": status}
 
 
 @app.get("/api/projects/{project_id}/video")

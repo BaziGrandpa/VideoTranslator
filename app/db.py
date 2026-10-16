@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS projects (
     subtitle_source TEXT, video_path TEXT, output_path TEXT, subtitle_style TEXT,
     punctuation_enabled INTEGER NOT NULL DEFAULT 1,
     pending_rebuild_scope TEXT, subtitle_revision INTEGER NOT NULL DEFAULT 0,
-    rendered_revision INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    rendered_revision INTEGER, resume_time_ms INTEGER,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS tokens (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -92,6 +93,7 @@ CREATE TABLE IF NOT EXISTS segments (
     source_text TEXT NOT NULL, target_text TEXT NOT NULL,
     quality_flags TEXT NOT NULL DEFAULT '[]',
     extra_line_gap INTEGER NOT NULL DEFAULT 0,
+    chinese_only INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'machine_translated',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at TEXT NOT NULL,
@@ -110,6 +112,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY, project_id TEXT NOT NULL
         REFERENCES projects(id) ON DELETE CASCADE,
     kind TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
     return_status TEXT, error TEXT, created_at TEXT NOT NULL,
     started_at TEXT, finished_at TEXT
 );
@@ -140,12 +143,26 @@ def init_db(database_path: Path | None = None) -> None:
         connection.executescript(CARD_SCHEMA)
         connection.execute("BEGIN IMMEDIATE")
         try:
+            project_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(projects)")
+            }
+            if "resume_time_ms" not in project_columns:
+                connection.execute("ALTER TABLE projects ADD COLUMN resume_time_ms INTEGER")
             segment_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(segments)")
             }
             if "extra_line_gap" not in segment_columns:
                 connection.execute(
                     "ALTER TABLE segments ADD COLUMN extra_line_gap INTEGER NOT NULL DEFAULT 0"
+                )
+            if "chinese_only" not in segment_columns:
+                connection.execute(
+                    "ALTER TABLE segments ADD COLUMN chinese_only INTEGER NOT NULL DEFAULT 0"
+                )
+            job_columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
+            if "cancel_requested" not in job_columns:
+                connection.execute(
+                    "ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
                 )
             connection.commit()
         except Exception:

@@ -140,6 +140,27 @@ def test_existing_punctuation_skips_model_before_pass0(
     assert source_punctuation_count(repository.list_tokens(project["id"])) == 1
 
 
+def test_non_speech_only_captions_fail_before_punctuation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "pipeline.db"
+    init_db(database)
+    repository = Repository(database)
+    project = repository.create_project("https://youtu.be/example")
+    repository.replace_tokens(project["id"], [
+        {"text": "[Music]", "start_ms": 0, "end_ms": 1000, "source": "test"},
+        {"text": "[Applause]", "start_ms": 1000, "end_ms": 2000, "source": "test"},
+    ])
+    monkeypatch.setattr(
+        pipeline_module,
+        "generate_punctuation_annotations",
+        lambda *_args, **_kwargs: pytest.fail("punctuation model must not be called"),
+    )
+    with pytest.raises(RuntimeError, match="No usable English subtitles found"):
+        Pipeline(repository).translate(project["id"])
+    assert repository.list_parts(project["id"]) == []
+
+
 def test_full_rebuild_enables_new_stage_and_clears_old_annotations(tmp_path: Path) -> None:
     database = tmp_path / "pipeline.db"
     init_db(database)

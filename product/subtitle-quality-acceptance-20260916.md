@@ -4,6 +4,10 @@ Historical snapshot of the pre-Token/Part/Cue/Sub-cue/Segment pipeline. Terms su
 "window" and "cue" below describe the system and saved outputs at that date; this
 document is not the current schema or workflow specification.
 
+For current thresholds and behavior, read [Current behavior](../docs/current-behavior.md)
+and the [October 15 audit](../docs/audit-2026-10-15.md). The counts and project states below
+are observations from September 16, not claims about today's database.
+
 Project: `c6220602-8850-4141-948d-cd7dfbeb226f`
 
 Video: I Doubled My Dopamine Everyday For 7 Days (45:15)

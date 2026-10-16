@@ -44,6 +44,8 @@ def ms_to_ass(value: int) -> str:
 
 
 def validate_segments(segments: list[dict[str, Any]]) -> list[str]:
+    if not segments:
+        return ["The project has no subtitles to render"]
     problems: list[str] = []
     previous: dict[str, Any] | None = None
     for index, segment in enumerate(segments, start=1):
@@ -53,7 +55,7 @@ def validate_segments(segments: list[dict[str, Any]]) -> list[str]:
             problems.append(f"Subtitle {index} cannot have a negative start time")
         if end_ms <= start_ms:
             problems.append(f"Subtitle {index} must end after it starts")
-        if not str(segment.get("source_text", "")).strip():
+        if not segment.get("chinese_only") and not str(segment.get("source_text", "")).strip():
             problems.append(f"Subtitle {index} has empty source text")
         if not display_target_text(str(segment.get("target_text", ""))):
             problems.append(f"Subtitle {index} has an empty translation")
@@ -65,7 +67,9 @@ def validate_segments(segments: list[dict[str, Any]]) -> list[str]:
 
 def write_srt(path: Path, segments: list[dict[str, Any]], field: str) -> None:
     blocks: list[str] = []
-    for index, segment in enumerate(segments, start=1):
+    for segment in segments:
+        if field == "source_text" and segment.get("chinese_only"):
+            continue
         raw_text = str(segment.get(field, ""))
         text = (
             display_target_text(raw_text)
@@ -73,7 +77,7 @@ def write_srt(path: Path, segments: list[dict[str, Any]], field: str) -> None:
             else normalize_source_text(raw_text)
         )
         blocks.append(
-            f"{index}\n{ms_to_srt(segment['start_ms'])} --> {ms_to_srt(segment['end_ms'])}\n{text}"
+            f"{len(blocks) + 1}\n{ms_to_srt(segment['start_ms'])} --> {ms_to_srt(segment['end_ms'])}\n{text}"
         )
     path.write_text("\n\n".join(blocks) + "\n", encoding="utf-8-sig")
 
@@ -137,15 +141,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         start = ms_to_ass(segment["start_ms"])
         end = ms_to_ass(segment["end_ms"])
         translated = ass_escape(display_target_text(str(segment["target_text"])))
-        chinese_event_margin = (
-            chinese_margin + EXTRA_LINE_GAP
-            if segment.get("extra_line_gap") and bilingual
-            else 0
-        )
+        chinese_only = bool(segment.get("chinese_only"))
+        if chinese_only and bilingual:
+            chinese_event_margin = english_margin
+        elif segment.get("extra_line_gap") and bilingual:
+            chinese_event_margin = chinese_margin + EXTRA_LINE_GAP
+        else:
+            chinese_event_margin = 0
         events.append(
             f"Dialogue: 1,{start},{end},Chinese,,0,0,{chinese_event_margin},,{translated}"
         )
-        if bilingual:
+        if bilingual and not chinese_only:
             source = ass_escape(normalize_source_text(str(segment["source_text"])))
             events.append(f"Dialogue: 1,{start},{end},English,,0,0,0,,{source}")
     path.write_text(header + "\n".join(events) + "\n", encoding="utf-8-sig")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import unicodedata
 from dataclasses import asdict, dataclass
 
+from app.services.cues import classify_token_kinds
 from app.services.subtitle_text import display_target_text
 
 
@@ -40,6 +41,10 @@ def quality_issues(start_ms: int, end_ms: int, source: str, target: str) -> list
     units = target_units(target)
     units_per_second = units * 1000 / duration
     issues = []
+    visible_characters = [
+        char for char in display_target_text(target)
+        if not char.isspace() and not unicodedata.category(char).startswith("P")
+    ]
 
     def add(kind: str, actual: float, limit: float) -> None:
         issues.append({"type": kind, "actual": round(actual, 3), "limit": limit})
@@ -57,6 +62,8 @@ def quality_issues(start_ms: int, end_ms: int, source: str, target: str) -> list
         add("high_target_reading_speed", units_per_second, RULES.max_target_units_per_second)
     if units > RULES.max_target_units:
         add("target_text_too_long", units, RULES.max_target_units)
+    if len(visible_characters) == 1 and "\u3400" <= visible_characters[0] <= "\u9fff":
+        add("single_chinese_character", 1, 2)
     return issues
 
 
@@ -65,6 +72,59 @@ def analyze_quality(start_ms: int, end_ms: int, source_text: str, translation: s
 
 
 PASS3_INVALID_OUTPUT = "pass3_invalid_output"
+AUDIO_EFFECT_BOUNDARY = "audio_effect_boundary"
+
+
+def audio_effect_boundary_segment_ids(
+    tokens: list[dict],
+    segments: list[dict],
+    component_token_ranges: dict[int, list[tuple[int, int]]] | None = None,
+) -> set[int]:
+    """Find segments on both sides of an unfinished sentence interrupted by an audio label."""
+    kinds = classify_token_kinds(tokens)
+    if not kinds:
+        return set()
+    token_ids = [int(token.get("token_id", index)) for index, token in enumerate(tokens)]
+    owners: dict[int, set[int]] = {}
+    for segment in segments:
+        segment_id = int(segment["id"])
+        start, end = segment.get("start_token_id"), segment.get("end_token_id")
+        ranges = (
+            [(int(start), int(end))]
+            if start is not None and end is not None
+            else (component_token_ranges or {}).get(segment_id, [])
+        )
+        for range_start, range_end in ranges:
+            for token_id in range(range_start, range_end + 1):
+                owners.setdefault(token_id, set()).add(segment_id)
+    flagged: set[int] = set()
+    index = 0
+    while index < len(tokens):
+        if kinds[index] != "stage_direction":
+            index += 1
+            continue
+        start = index
+        while index < len(tokens) and kinds[index] == "stage_direction":
+            index += 1
+        labels = " ".join(str(token["text"]).casefold() for token in tokens[start:index])
+        if not any(label in labels for label in ("music", "applause", "音乐", "掌声", "♪", "♫", "♬")):
+            continue
+        before = start - 1
+        while before >= 0 and kinds[before] != "speech":
+            before -= 1
+        after = index
+        while after < len(tokens) and kinds[after] != "speech":
+            after += 1
+        if before < 0 or after == len(tokens):
+            continue
+        preceding = str(tokens[before]["text"]).strip().rstrip("\"'”’》」』】）)]}")
+        if preceding.endswith((".", "?", "!")):
+            continue
+        left_ids = owners.get(token_ids[before], set())
+        right_ids = owners.get(token_ids[after], set())
+        if left_ids and right_ids:
+            flagged.update(left_ids | right_ids)
+    return flagged
 
 
 def stamp_segment_review_flags(segments: list[dict]) -> list[dict]:
@@ -117,8 +177,12 @@ def describe_review_problems(problems: list[dict]) -> str:
             )
         elif kind == "high_target_reading_speed":
             parts.append(f"Reading speed is {actual} units/s; the limit is {limit}.")
+        elif kind == "single_chinese_character":
+            parts.append("Chinese subtitle has only one character.")
         elif kind == PASS3_INVALID_OUTPUT:
             parts.append("Pass 3 could not split this cue.")
+        elif kind == AUDIO_EFFECT_BOUNDARY:
+            parts.append("Music or applause interrupts nearby speech. Check both subtitles for a split sentence or misplaced translation.")
     return " ".join(parts)
 
 

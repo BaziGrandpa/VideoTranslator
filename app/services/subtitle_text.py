@@ -47,9 +47,15 @@ def normalize_target_text(value: str) -> str:
     return WHITESPACE_RE.sub(" ", value).strip()
 
 
+def normalize_manual_target_text(value: str) -> str:
+    """Keep explicit Segment line breaks while normalizing the text on each line."""
+    lines = str(value).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return "\n".join(normalized for line in lines if (normalized := normalize_target_text(line)))
+
+
 def display_target_text(value: str) -> str:
     """Remove trailing marks only when producing visible subtitle text."""
-    return TRAILING_DISPLAY_MARK_RE.sub("", normalize_target_text(value))
+    return TRAILING_DISPLAY_MARK_RE.sub("", normalize_manual_target_text(value))
 
 
 def normalize_segment_texts(source_text: str, target_text: str) -> tuple[str, str]:

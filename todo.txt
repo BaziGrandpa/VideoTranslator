@@ -1,0 +1,4 @@
+Resolved in the current splitter: keep closing quotes/brackets with preceding Chinese punctuation.
+Implementation: app/services/subtitle_planner.py (CHINESE_SPLIT_RE).
+Scope: future splitting/rebuilds; this is not an automatic migration of all stored subtitles.
+Current behavior and open follow-ups: docs/current-behavior.md and docs/audit-2026-10-15.md.

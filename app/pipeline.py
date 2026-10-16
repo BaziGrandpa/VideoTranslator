@@ -9,11 +9,11 @@ from app.cards.repository import CardRepository
 from app.config import settings
 from app.repository import Repository
 from app.services.caption_tokens import reconstruct_vtt_tokens
-from app.services.cues import build_cues
+from app.services.cues import build_cues, classify_token_kinds
 from app.services.downloader import download_youtube
 from app.services.parts import build_parts
 from app.services.punctuation import source_fingerprint, source_punctuation_count
-from app.services.renderer import render_project
+from app.services.renderer import RenderCancelled, render_project
 from app.services.subtitle_planner import (
     TranslationQuotaError,
     align_part_cues,
@@ -33,6 +33,10 @@ from app.services.transcriber import transcribe_tokens
 from app.services.translation_audit import record_event
 
 logger = logging.getLogger(__name__)
+
+
+class NoUsableSubtitlesError(RuntimeError):
+    """The timed text contains no speech that the translator can use."""
 
 
 class Pipeline:
@@ -326,7 +330,11 @@ class Pipeline:
 
     def _save_tokens_and_translate(self, project_id: str, tokens: list[dict]) -> None:
         if not tokens:
-            raise RuntimeError("No usable English timed tokens were generated")
+            raise NoUsableSubtitlesError(
+                "No usable English subtitles found. The source has no spoken text "
+                "to translate. You can delete this project or use a video with "
+                "English speech captions."
+            )
 
         # The normalized token timeline is the durable source of truth. A CLI
         # failure can be retried without downloading or transcribing again.
@@ -347,6 +355,13 @@ class Pipeline:
         tokens = self.repository.list_tokens(project_id)
         if not tokens:
             raise RuntimeError("The project has no timed tokens to plan and translate")
+        if "speech" not in classify_token_kinds(tokens):
+            raise NoUsableSubtitlesError(
+                "No usable English subtitles found. The downloaded captions contain "
+                "only non-speech labels such as [Music] or [Applause], with no spoken "
+                "text to translate. You can delete this project or use a video with "
+                "English speech captions."
+            )
         providers = _provider_order(str(project.get("translation_provider") or "auto"))
         codex_model = str(project.get("codex_model") or settings.codex_model)
 
@@ -875,21 +890,16 @@ class Pipeline:
             progress_callback=lambda value: self.repository.update_project(
                 project_id, progress=max(5, min(99, value))
             ),
+            should_cancel=lambda: self.repository.render_cancel_requested(project_id),
             subtitle_style=project["subtitle_style"],
             cards=cards,
         )
-        latest = self.repository.get_project(project_id)
-        assert latest is not None
-        self.repository.update_project(
-            project_id,
-            status="completed",
-            stage="completed",
-            progress=100,
-            pipeline_detail=None,
-            output_path=str(output_path),
-            rendered_revision=latest["subtitle_revision"],
-            error=None,
-        )
+        if not self.repository.publish_render(project_id, str(output_path)):
+            suffix = output_path.stem.removeprefix("final-")
+            output_path.unlink(missing_ok=True)
+            for language in ("english", "chinese"):
+                (output_path.parent / f"{language}-{suffix}.srt").unlink(missing_ok=True)
+            raise RenderCancelled("Render cancelled")
         CardRepository(self.repository.database_path).mark_rendered(project_id)
 
 

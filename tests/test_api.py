@@ -1,11 +1,32 @@
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.db import connect, init_db
 from app.repository import Repository
+
+
+@pytest.mark.parametrize("status", ["failed", "waiting_review", "completed"])
+def test_empty_subtitles_cannot_queue_render(tmp_path: Path, monkeypatch, status: str) -> None:
+    database = tmp_path / "api.db"
+    init_db(database)
+    repository = Repository(database)
+    project = repository.create_project("https://youtu.be/example")
+    repository.update_project(project["id"], status=status, stage=status)
+    before = repository.get_project(project["id"])
+    monkeypatch.setattr(main_module, "repository", repository)
+    client = TestClient(main_module.app)
+
+    response = client.post(f"/api/projects/{project['id']}/approve-and-render", json={})
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == ["The project has no subtitles to render"]
+    assert repository.get_project(project["id"]) == before
+    with connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
 
 
 def test_create_project_and_edit_segment(tmp_path: Path, monkeypatch) -> None:
@@ -48,6 +69,62 @@ def test_create_project_and_edit_segment(tmp_path: Path, monkeypatch) -> None:
     assert boosted.status_code == 200
     assert boosted.json()["extra_line_gap"] is True
     assert client.get(f"/api/projects/{project_id}/segments").json()[0]["extra_line_gap"] is True
+
+
+def test_chinese_only_edit_can_queue_render_without_english(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "api.db"
+    init_db(database)
+    repository = Repository(database)
+    monkeypatch.setattr(main_module, "repository", repository)
+    client = TestClient(main_module.app)
+    project = repository.create_project("https://youtu.be/example")
+    project_id = project["id"]
+    repository.replace_segments(project_id, [{
+        "start_ms": 0, "end_ms": 1000, "source_text": "", "target_text": "第一行。\n第二行。",
+    }])
+    repository.update_project(project_id, status="waiting_review", stage="waiting_review")
+    segment_id = repository.list_segments(project_id)[0]["id"]
+    endpoint = f"/api/projects/{project_id}/approve-and-render"
+
+    assert client.post(endpoint, json={}).status_code == 422
+    edited = client.patch(
+        f"/api/projects/{project_id}/segments/{segment_id}",
+        json={"chinese_only": True, "target_text": "第一行。\n第二行。"},
+    )
+    assert edited.status_code == 200
+    assert edited.json()["chinese_only"] is True
+    assert edited.json()["target_text"] == "第一行。\n第二行。"
+    assert client.get(f"/api/projects/{project_id}/segments").json()[0]["chinese_only"] is True
+    assert client.post(endpoint, json={}).status_code == 200
+
+
+def test_resume_time_saves_without_changing_subtitle_revision(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "api.db"
+    init_db(database)
+    repository = Repository(database)
+    monkeypatch.setattr(main_module, "repository", repository)
+    client = TestClient(main_module.app)
+    project = repository.create_project("https://youtu.be/example")
+    repository.update_project(project["id"], duration_ms=10_000)
+    before = repository.get_project(project["id"])
+
+    response = client.put(
+        f"/api/projects/{project['id']}/resume-time", json={"time_ms": 4200}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"time_ms": 4200}
+    saved = client.get(f"/api/projects/{project['id']}").json()
+    assert saved["resume_time_ms"] == 4200
+    assert saved["subtitle_revision"] == before["subtitle_revision"]
+    assert saved["updated_at"] == before["updated_at"]
+
+    clamped = client.put(
+        f"/api/projects/{project['id']}/resume-time", json={"time_ms": 12_000}
+    )
+    assert clamped.json() == {"time_ms": 10_000}
+    assert client.put(
+        f"/api/projects/{project['id']}/resume-time", json={"time_ms": -1}
+    ).status_code == 422
 
 
 def test_timing_updates_share_neighbor_boundaries_and_reject_zero_duration(
@@ -174,7 +251,10 @@ def test_project_display_name_can_be_changed_without_replacing_video_title(
     assert reset.json()["effective_name"] == "Original YouTube title"
 
 
-def test_delete_project_removes_database_and_both_file_trees(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("terminal_stage", ["waiting_review", "no_subtitles"])
+def test_delete_project_removes_database_and_both_file_trees(
+    tmp_path: Path, monkeypatch, terminal_stage: str
+) -> None:
     database = tmp_path / "api.db"
     init_db(database)
     repository = Repository(database)
@@ -189,7 +269,11 @@ def test_delete_project_removes_database_and_both_file_trees(tmp_path: Path, mon
     job = repository.enqueue_job(project["id"], "prepare")
     repository.claim_next_job()
     repository.complete_job(job["id"])
-    repository.update_project(project["id"], status="waiting_review", stage="waiting_review")
+    repository.update_project(
+        project["id"],
+        status="failed" if terminal_stage == "no_subtitles" else "waiting_review",
+        stage=terminal_stage,
+    )
     repository.replace_tokens(
         project["id"], [{"text": "Hello", "start_ms": 0, "end_ms": 1000}]
     )
@@ -225,11 +309,16 @@ def test_delete_project_removes_database_and_both_file_trees(tmp_path: Path, mon
     other_output = tmp_path / "output" / other["id"]
     other_output.mkdir()
     (other_output / "keep.txt").write_text("keep")
+    cancelled = []
+    monkeypatch.setattr(main_module.preview_processes, "cancel", cancelled.append)
 
     client = TestClient(main_module.app)
+    if terminal_stage == "no_subtitles":
+        assert client.post(f"/api/projects/{project['id']}/retry").status_code == 409
     response = client.delete(f"/api/projects/{project['id']}")
 
     assert response.status_code == 200
+    assert cancelled == [project["id"]]
     assert repository.get_project(project["id"]) is None
     assert repository.list_segments(project["id"]) == []
     assert not source.parent.exists()
@@ -510,6 +599,35 @@ def test_selected_part_rebuild_keeps_pass0_and_visible_cues(
             }
         ],
     )
+    repository.update_part(part["id"], status="completed")
+
+    original = repository.list_segments(project["id"])[0]
+    split_response = client.post(
+        f"/api/projects/{project['id']}/segments/{original['id']}/split", json={}
+    )
+    assert split_response.status_code == 200
+    new_segment_id = split_response.json()["new_segment_id"]
+    split_rows = repository.list_segments(project["id"])
+    assert len(split_rows) == 2
+    assert split_rows[1]["id"] == new_segment_id
+    assert split_rows[1]["source_text"] == split_rows[1]["target_text"] == ""
+
+    gap_response = client.patch(
+        f"/api/projects/{project['id']}/segments/{new_segment_id}",
+        json={"extra_line_gap": True},
+    )
+    assert gap_response.status_code == 200
+    assert gap_response.json()["extra_line_gap"] is True
+    assert gap_response.json()["source_text"] == gap_response.json()["target_text"] == ""
+    refreshed_project = client.get(f"/api/projects/{project['id']}").json()
+    assert refreshed_project["status"] == "waiting_review"
+    assert refreshed_project["segment_count"] == 2
+
+    invalid_render = client.post(
+        f"/api/projects/{project['id']}/approve-and-render", json={}
+    )
+    assert invalid_render.status_code == 422
+    assert any("empty" in problem for problem in invalid_render.json()["detail"])
 
     response = client.post(
         f"/api/projects/{project['id']}/rebuild-subtitles",
@@ -523,6 +641,67 @@ def test_selected_part_rebuild_keeps_pass0_and_visible_cues(
     assert rebuilt["context_approved"] is True
     assert rebuilt["pending_rebuild_scope"]["parts"][0]["part_id"] == part["id"]
     assert repository.list_segments(project["id"])[0]["target_text"] == "你好。"
+
+    repository.commit_part_rebuild(
+        project["id"],
+        rebuilt["subtitle_revision"],
+        [{
+            "part_id": part["id"],
+            "source_text": "Hello.",
+            "target_text": "新翻译。",
+            "translation_provider": "codex",
+            "cues": [{
+                "cue_id": 1, "start_token_id": 0, "end_token_id": 0,
+                "start_ms": 0, "end_ms": 1000,
+                "source_text": "Hello.", "target_text": "新翻译。",
+            }],
+            "subcues": [],
+            "segments": [{
+                "start_ms": 0, "end_ms": 1000,
+                "start_token_id": 0, "end_token_id": 0,
+                "source_text": "Hello.", "target_text": "新翻译。",
+            }],
+        }],
+    )
+    rebuilt_segments = repository.list_segments(project["id"])
+    assert len(rebuilt_segments) == 1
+    assert rebuilt_segments[0]["target_text"] == "新翻译。"
+
+
+def test_audio_review_keeps_both_segments_after_manual_split(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "api.db"
+    init_db(database)
+    repository = Repository(database)
+    monkeypatch.setattr(main_module, "repository", repository)
+    project = repository.create_project("https://youtu.be/example")
+    project_id = project["id"]
+    repository.replace_tokens(project_id, [
+        {"text": "at", "start_ms": 0, "end_ms": 1000},
+        {"text": "[Music]", "start_ms": 1000, "end_ms": 2000},
+        {"text": "checkout.", "start_ms": 2000, "end_ms": 3000},
+    ])
+    repository.initialize_subtitle_plan(project_id, [{
+        "start_token_id": 0, "end_token_id": 2, "start_ms": 0, "end_ms": 3000,
+    }])
+    part_id = repository.list_parts(project_id)[0]["id"]
+    repository.replace_cues(project_id, part_id, [{
+        "cue_id": 1, "start_token_id": 0, "end_token_id": 2,
+        "start_ms": 0, "end_ms": 3000,
+        "source_text": "at checkout.", "target_text": "结账时。",
+    }])
+    repository.replace_part_segments(project_id, part_id, [{
+        "start_ms": 0, "end_ms": 3000,
+        "start_token_id": 0, "end_token_id": 2,
+        "cue_id": 1, "source_text": "at checkout.", "target_text": "结账时。",
+    }])
+    original = repository.list_segments(project_id)[0]
+    repository.split_segment(project_id, original["id"])
+
+    issues = TestClient(main_module.app).get(f"/api/projects/{project_id}/review-issues").json()
+    audio_issues = [issue for issue in issues if "audio_effect_boundary" in issue["issue_types"]]
+    assert {issue["segment_id"] for issue in audio_issues} == {
+        segment["id"] for segment in repository.list_segments(project_id)
+    }
 
 
 def test_review_issues_are_live_segment_problems_without_severity(
@@ -580,6 +759,58 @@ def test_review_issues_are_live_segment_problems_without_severity(
     assert "very_long_duration" in by_type
     assert "pass3_invalid_output" in by_type
     assert by_type["pass3_invalid_output"]["reason"] == "Pass 3 could not split this cue."
+
+
+def test_single_chinese_character_appears_in_live_review_issues(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = tmp_path / "api.db"
+    init_db(database)
+    repository = Repository(database)
+    monkeypatch.setattr(main_module, "repository", repository)
+    project = repository.create_project("https://youtu.be/example")
+    repository.replace_segments(project["id"], [{
+        "start_ms": 472_560,
+        "end_ms": 473_360,
+        "source_text": "And it's like, okay,",
+        "target_text": "可",
+    }])
+
+    response = TestClient(main_module.app).get(f"/api/projects/{project['id']}/review-issues")
+
+    assert response.status_code == 200
+    assert response.json()[0]["issue_types"] == ["single_chinese_character"]
+    assert response.json()[0]["reason"] == "Chinese subtitle has only one character."
+
+
+def test_audio_effect_between_speech_adds_both_segments_to_review_issues(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = tmp_path / "api.db"
+    init_db(database)
+    repository = Repository(database)
+    monkeypatch.setattr(main_module, "repository", repository)
+    project = repository.create_project("https://youtu.be/example")
+    repository.replace_tokens(project["id"], [
+        {"text": "at", "start_ms": 0, "end_ms": 1000},
+        {"text": "[Music]", "start_ms": 1000, "end_ms": 2000},
+        {"text": "[Applause]", "start_ms": 2000, "end_ms": 3000},
+        {"text": "checkout.", "start_ms": 3000, "end_ms": 4000},
+    ])
+    repository.replace_segments(project["id"], [
+        {"start_ms": 0, "end_ms": 1000, "start_token_id": 0, "end_token_id": 0,
+         "source_text": "at", "target_text": "结账时"},
+        {"start_ms": 3000, "end_ms": 4000, "start_token_id": 1, "end_token_id": 3,
+         "source_text": "checkout.", "target_text": "输入代码。"},
+    ])
+
+    issues = TestClient(main_module.app).get(
+        f"/api/projects/{project['id']}/review-issues"
+    ).json()
+
+    assert len(issues) == 2
+    assert all("audio_effect_boundary" in issue["issue_types"] for issue in issues)
+    assert all("Check both subtitles" in issue["reason"] for issue in issues)
 
 
 def test_exact_preview_returns_ffmpeg_frame(tmp_path: Path, monkeypatch) -> None:

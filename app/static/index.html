@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Video Translator</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2216%22 fill=%22%2338d39f%22/><text x=%2232%22 y=%2241%22 text-anchor=%22middle%22 font-size=%2228%22 font-family=%22Arial%22 font-weight=%22700%22 fill=%22%2306251b%22>VT</text></svg>" />
-    <link rel="stylesheet" href="/static/styles.css?v=20260926-project-delete" />
+    <link rel="stylesheet" href="/static/styles.css?v=20261016-chinese-only" />
     <link rel="stylesheet" href="/static/cards.css?v=20261009-cards" />
   </head>
   <body>
@@ -64,6 +64,7 @@
             </div>
             <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
             <div id="current-step" class="current-step hidden"></div>
+            <button id="cancel-render" type="button" class="danger-button hidden">Cancel render</button>
             <div id="project-error" class="error-box hidden"></div>
             <div id="part-progress" class="part-progress"></div>
           </div>
@@ -372,7 +373,7 @@
     </dialog>
 
     <div id="toast" class="toast hidden"></div>
-    <script src="/static/app.js?v=20261010-workspace-ready" defer></script>
+    <script src="/static/app.js?v=20261016-manual-breaks" defer></script>
     <script src="/static/cards.js?v=20261010-card-center" defer></script>
   </body>
 </html>

@@ -716,14 +716,26 @@ def _parent_token_range(parent_cues: list[dict[str, Any]]) -> list[int]:
     ]
 
 
-CHINESE_SPLIT_RE = re.compile(r"(?<=[，。！？；])")
+CHINESE_CLOSING_MARKS = "”’》」』】）)]}"
+CHINESE_SPLIT_RE = re.compile(
+    r"[，。！？；]+[" + re.escape(CHINESE_CLOSING_MARKS) + r"]*"
+)
 CHINESE_CONTINUATION_PUNCTUATION = ("，", "；")
 
 
 def _split_chinese_on_punctuation(value: str) -> list[str] | None:
     """Pre-split Chinese on internal punctuation and absorb short fragments."""
     text = str(value).strip()
-    raw = [piece.strip() for piece in CHINESE_SPLIT_RE.split(text) if piece.strip()]
+    raw: list[str] = []
+    start = 0
+    for match in CHINESE_SPLIT_RE.finditer(text):
+        piece = text[start : match.end()].strip()
+        if piece:
+            raw.append(piece)
+        start = match.end()
+    tail = text[start:].strip()
+    if tail:
+        raw.append(tail)
     if len(raw) < 2:
         return None
 
@@ -735,7 +747,9 @@ def _split_chinese_on_punctuation(value: str) -> list[str] | None:
             cleaned = normalize_target_text(piece)
             if target_units(cleaned) >= RULES.short_target_units:
                 continue
-            prefer_next = piece.rstrip().endswith(CHINESE_CONTINUATION_PUNCTUATION)
+            prefer_next = piece.rstrip().rstrip(CHINESE_CLOSING_MARKS).endswith(
+                CHINESE_CONTINUATION_PUNCTUATION
+            )
             preferred = index + 1 if prefer_next and index + 1 < len(pieces) else index - 1
             if preferred < 0:
                 preferred = index + 1

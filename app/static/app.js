@@ -10,6 +10,7 @@ const state = {
   reviewMode: false,
   selectedId: null,
   activeId: null,
+  resume: { projectId: null, lastSavedMs: null, ready: false, inFlight: null },
   pollTimer: null,
   previewToken: 0,
   subtitleStyle: null,
@@ -69,8 +70,10 @@ const stageNames = {
   waiting_review: "Waiting for human review",
   render_queued: "Approved and queued for rendering",
   rendering: "Burning subtitles and rendering video",
+  render_cancelling: "Cancelling render",
   completed: "Video generated",
   failed: "Processing failed",
+  no_subtitles: "No usable subtitles",
 };
 
 function formatPipelineDetail(detail) {
@@ -225,6 +228,7 @@ function updateSubtitlePreviewGeometry() {
   const bottomMargin = Math.max(0, style.layout.bottom_margin);
   const activeSegment = state.segments.find((segment) => segment.id === state.activeId);
   const chineseMargin = state.project?.bilingual === false
+    || activeSegment?.chinese_only
     ? bottomMargin
     : bottomMargin + Math.max(0, style.layout.line_gap) + (activeSegment?.extra_line_gap ? 30 : 0);
   const horizontalMargin = Math.max(0, style.layout.horizontal_margin);
@@ -326,6 +330,7 @@ function clearReviewData() {
   state.reviewMode = false;
   state.selectedId = null;
   state.activeId = null;
+  state.resume.ready = false;
   state.previewToken += 1;
   const video = $("#video");
   video.pause();
@@ -342,6 +347,7 @@ async function openProject(projectId) {
     && !window.confirm("Discard unsaved Pass 0 translation guidance changes?")
   ) return;
   if (!(await flushPendingSegmentSaves())) return;
+  await saveVideoPosition();
   if (!$("#subtitle-style-panel").classList.contains("hidden")) {
     const closed = await closeSubtitleStylePanel({ refreshExactPreview: false });
     if (!closed) return;
@@ -362,6 +368,12 @@ async function openProject(projectId) {
     throw error;
   }
   clearReviewData();
+  state.resume = {
+    projectId,
+    lastSavedMs: state.project.resume_time_ms,
+    ready: false,
+    inFlight: null,
+  };
   state.unsavedSegmentFields.clear();
   state.segmentTextSaves.clear();
   state.independentTimingBoundaries.clear();
@@ -376,7 +388,10 @@ async function openProject(projectId) {
   renderProject();
   renderProviderControl();
   renderProjectList();
-  if (reviewWorkspaceReady(state.project)) await loadSegments(projectId);
+  if (reviewWorkspaceReady(state.project)) {
+    await loadSegments(projectId);
+    restoreVideoPosition(projectId);
+  }
   await cardsLoad;
   syncPolling();
 }
@@ -384,7 +399,7 @@ async function openProject(projectId) {
 function projectIsRenderLocked(project = state.project) {
   return Boolean(
     project && (
-      ["render_queued", "rendering"].includes(project.stage)
+      ["render_queued", "rendering", "render_cancelling"].includes(project.stage)
       || state.localRenderLockProjectId === project.id
     ),
   );
@@ -412,6 +427,10 @@ function renderProject() {
   const currentStepText = formatPipelineDetail(project.pipeline_detail);
   currentStep.textContent = currentStepText;
   currentStep.classList.toggle("hidden", !currentStepText);
+  const cancelRenderButton = $("#cancel-render");
+  cancelRenderButton.classList.toggle("hidden", !["render_queued", "rendering", "render_cancelling"].includes(project.stage));
+  cancelRenderButton.disabled = project.stage === "render_cancelling";
+  cancelRenderButton.textContent = project.stage === "render_cancelling" ? "Cancelling…" : "Cancel render";
   const errorBox = $("#project-error");
   errorBox.textContent = project.error || "";
   errorBox.classList.toggle("hidden", !project.error);
@@ -425,7 +444,7 @@ function renderProject() {
   const actions = $("#project-actions");
   actions.innerHTML = "";
   actions.inert = renderLocked;
-  if (["failed", "waiting_for_quota"].includes(project.status)) {
+  if (["failed", "waiting_for_quota"].includes(project.status) && project.stage !== "no_subtitles") {
     const retry = document.createElement("button");
     retry.textContent = project.status === "waiting_for_quota" ? "Resume translation" : "Retry failed step";
     retry.className = "primary";
@@ -789,7 +808,12 @@ async function loadSegments(projectId = state.project?.id) {
     state.reviewIssues = reviewIssues;
     state.segmentDataProjectId = segments.length ? projectId : null;
     if (!state.reviewIssues.length) state.reviewMode = false;
-    if (!state.selectedId && state.segments.length) state.selectedId = state.segments[0].id;
+    if (!state.segments.some((segment) => segment.id === state.selectedId)) {
+      const currentMs = Math.round($("#video").currentTime * 1000);
+      state.selectedId = state.segments.find(
+        (segment) => segment.start_ms <= currentMs && currentMs < segment.end_ms,
+      )?.id ?? state.segments[0]?.id ?? null;
+    }
     renderSegments();
     renderProject();
     updatePreview();
@@ -801,6 +825,7 @@ async function loadSegments(projectId = state.project?.id) {
 function renderSegments() {
   const reviewed = state.segments.filter((segment) => segment.status === "reviewed").length;
   const flaggedIds = new Set(state.reviewIssues.map((issue) => issue.segment_id));
+  const segmentByOrder = new Map(state.segments.map((segment) => [segment.segment_order, segment]));
   const flagged = flaggedIds.size;
   $("#segment-summary").textContent = state.reviewMode
     ? `${state.reviewIssues.length} issues · all review states`
@@ -810,15 +835,15 @@ function renderSegments() {
     : "English / Translation";
   const list = $("#segment-list");
   if (state.reviewMode) {
-    renderReviewIssues(list);
+    renderReviewIssues(list, segmentByOrder);
     return;
   }
   list.innerHTML = state.segments.map((segment) => `
     <div class="segment-row ${segment.id === state.selectedId ? "selected" : ""} ${segment.id === state.activeId ? "active" : ""}" data-id="${segment.id}">
-      ${timeFieldsMarkup(segment, flaggedIds.has(segment.id))}
+      ${timeFieldsMarkup(segment, flaggedIds.has(segment.id), segmentByOrder.get(segment.segment_order + 1))}
       <div class="text-fields">
         <textarea class="source" aria-label="English subtitle">${escapeHtml(segment.source_text)}</textarea>
-        <textarea class="translation" aria-label="Translated subtitle">${escapeHtml(segment.target_text)}</textarea>
+        <textarea class="translation" aria-label="Translated subtitle" title="Shift+Enter: line break · Enter: save">${escapeHtml(segment.target_text)}</textarea>
       </div>
       <label class="review-check"><input class="reviewed" type="checkbox" ${segment.status === "reviewed" ? "checked" : ""} aria-label="Reviewed" /></label>
     </div>`).join("");
@@ -834,7 +859,7 @@ function renderSegments() {
       input.addEventListener("input", (event) => editSegmentText(id, field, event.target.value));
       input.addEventListener("blur", (event) => void saveSegmentText(id, field, event.target.value));
       input.addEventListener("keydown", (event) => {
-        if (event.key !== "Enter") return;
+        if (event.key !== "Enter" || event.isComposing || (field === "target_text" && event.shiftKey)) return;
         event.preventDefault();
         void saveSegmentText(id, field, event.target.value);
       });
@@ -847,6 +872,8 @@ function renderSegments() {
 function issueLabel(issue) {
   const types = issue.issue_types || [];
   if (types.includes("pass3_invalid_output")) return "Pass 3 split failed";
+  if (types.includes("audio_effect_boundary")) return "Speech around music or applause";
+  if (types.includes("single_chinese_character")) return "Single Chinese character";
   if (types.includes("target_text_too_long")) return "Overlong subtitle";
   if (types.includes("very_long_duration")) return "Long duration";
   if (types.includes("very_short_duration")) return "Short duration";
@@ -854,15 +881,15 @@ function issueLabel(issue) {
   return "Needs review";
 }
 
-function renderReviewIssues(list) {
+function renderReviewIssues(list, segmentByOrder) {
   list.innerHTML = state.reviewIssues.map((issue) => {
     const segment = state.segments.find((item) => item.id === issue.segment_id);
     const row = segment ? `
         <div class="segment-row review-issue-row ${segment.id === state.selectedId ? "selected" : ""}" data-id="${segment.id}" data-issue-id="${escapeHtml(issue.id)}">
-          ${timeFieldsMarkup(segment, false)}
+          ${timeFieldsMarkup(segment, false, segmentByOrder.get(segment.segment_order + 1))}
           <div class="text-fields review-text-fields">
             <textarea class="source" aria-label="English subtitle" readonly>${escapeHtml(segment.source_text)}</textarea>
-            <textarea class="translation" aria-label="Current translated subtitle">${escapeHtml(segment.target_text)}</textarea>
+            <textarea class="translation" aria-label="Current translated subtitle" title="Shift+Enter: line break · Enter: save">${escapeHtml(segment.target_text)}</textarea>
             <div class="suggestion-row diagnostic">
               <div class="suggestion-text"><span class="suggestion-label">Review note</span>${escapeHtml(issue.reason)}</div>
             </div>
@@ -890,7 +917,7 @@ function renderReviewIssues(list) {
     translation.addEventListener("input", (event) => editSegmentText(id, "target_text", event.target.value));
     translation.addEventListener("blur", (event) => void saveSegmentText(id, "target_text", event.target.value));
     translation.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter") return;
+      if (event.key !== "Enter" || event.isComposing || event.shiftKey) return;
       event.preventDefault();
       void saveSegmentText(id, "target_text", event.target.value);
     });
@@ -899,13 +926,46 @@ function renderReviewIssues(list) {
   });
 }
 
-function timeFieldsMarkup(segment, showWarning) {
+function segmentPartIds(segment) {
+  const parts = new Set((segment.components || []).map((component) => component.part_id));
+  if (segment.part_id != null) parts.add(segment.part_id);
+  return parts;
+}
+
+function mergeDisabledReason(segment, nextSegment) {
+  if (!nextSegment) return "This is already the final subtitle";
+  const currentParts = segmentPartIds(segment);
+  const nextParts = segmentPartIds(nextSegment);
+  if ((currentParts.size || nextParts.size) && (
+    currentParts.size !== 1 || nextParts.size !== 1
+    || !nextParts.has([...currentParts][0])
+  )) return "Subtitles from different Parts cannot be merged";
+  if (Boolean(segment.chinese_only) !== Boolean(nextSegment.chinese_only)) {
+    return "Subtitles with different English display settings cannot be merged";
+  }
+  return null;
+}
+
+function splitDisabledReason(segment) {
+  if (segment.end_ms - segment.start_ms < 200) {
+    return "Subtitle must be at least 200 ms long";
+  }
+  const parts = segmentPartIds(segment);
+  if (parts.size !== 1 || !segment.components?.length) {
+    return "Subtitle needs a single Part and Cue provenance";
+  }
+  return null;
+}
+
+function timeFieldsMarkup(segment, showWarning, nextSegment) {
   const issue = state.reviewIssues.find((item) => item.segment_id === segment.id);
   const warning = showWarning && issue
     ? `<span class="quality-warning" title="${escapeHtml((issue.issue_types || []).map((flag) => flag.replaceAll("_", " ")).join(", "))}">Check readability</span>`
     : "";
   const independentStart = state.independentTimingBoundaries.has(`${segment.id}:start`);
   const independentEnd = state.independentTimingBoundaries.has(`${segment.id}:end`);
+  const mergeReason = mergeDisabledReason(segment, nextSegment);
+  const splitReason = splitDisabledReason(segment);
   return `
     <div class="time-fields">
       <div class="time-field-row">
@@ -928,19 +988,56 @@ function timeFieldsMarkup(segment, showWarning) {
       </div>
       ${warning}
       <label class="extra-line-gap-toggle" title="Add 30 to this subtitle's line gap">
-        <input class="extra-line-gap" type="checkbox" ${segment.extra_line_gap ? "checked" : ""} aria-label="Extra line gap for this subtitle" />
+        <input class="extra-line-gap" type="checkbox" ${segment.extra_line_gap ? "checked" : ""} ${segment.chinese_only ? "disabled" : ""} aria-label="Extra line gap for this subtitle" />
         <span class="extra-line-gap-track" aria-hidden="true"></span>
         <span>Line gap +30</span>
       </label>
+      <label class="chinese-only-toggle" title="Hide the English subtitle on this Segment">
+        <input class="chinese-only" type="checkbox" ${segment.chinese_only ? "checked" : ""} aria-label="Chinese only for this subtitle" />
+        <span class="chinese-only-track" aria-hidden="true"></span>
+        <span>Chinese only</span>
+      </label>
+      <div class="segment-action-row">
+        <button class="merge-next-button" type="button" ${mergeReason ? `disabled title="${escapeHtml(mergeReason)}"` : ""}>Merge with next</button>
+        <button class="split-button" type="button" ${splitReason ? `disabled title="${escapeHtml(splitReason)}"` : ""}>Split</button>
+      </div>
     </div>`;
 }
 
 function bindTimingControls(row, id) {
+  row.querySelector(".merge-next-button").addEventListener("click", (event) => {
+    event.stopPropagation();
+    void mergeSegmentWithNext(id, event.currentTarget);
+  });
+  row.querySelector(".split-button").addEventListener("click", (event) => {
+    event.stopPropagation();
+    void splitSegment(id, event.currentTarget);
+  });
   row.querySelector(".extra-line-gap-toggle").addEventListener("click", (event) => event.stopPropagation());
   row.querySelector(".extra-line-gap").addEventListener("change", async (event) => {
     const toggle = event.target;
     toggle.disabled = true;
-    const saved = await saveSegment(id, { extra_line_gap: toggle.checked }, true);
+    const saved = await saveSegment(id, { extra_line_gap: toggle.checked });
+    if (toggle.isConnected) {
+      const segment = state.segments.find((item) => item.id === id);
+      if (segment) toggle.checked = Boolean(segment.extra_line_gap);
+      toggle.disabled = false;
+    }
+    if (saved && state.exactPreview.open) scheduleExactPreview();
+  });
+  row.querySelector(".chinese-only-toggle").addEventListener("click", (event) => event.stopPropagation());
+  row.querySelector(".chinese-only").addEventListener("change", async (event) => {
+    const toggle = event.target;
+    toggle.disabled = true;
+    const saved = await saveSegment(id, { chinese_only: toggle.checked });
+    if (toggle.isConnected) {
+      const segment = state.segments.find((item) => item.id === id);
+      if (segment) {
+        toggle.checked = Boolean(segment.chinese_only);
+        row.querySelector(".extra-line-gap").disabled = Boolean(segment.chinese_only);
+      }
+      toggle.disabled = false;
+    }
     if (saved && state.exactPreview.open) scheduleExactPreview();
   });
   row.querySelectorAll(".independent-time-toggle").forEach((toggle) => {
@@ -1161,6 +1258,116 @@ async function flushPendingSegmentSaves() {
   return false;
 }
 
+async function mergeSegmentWithNext(id, button) {
+  const projectId = state.project?.id;
+  if (!projectId) return;
+  button.disabled = true;
+  try {
+    if (!(await flushPendingSegmentSaves()) || state.project?.id !== projectId) return;
+    const segment = state.segments.find((item) => item.id === id);
+    const nextSegment = state.segments.find(
+      (item) => item.segment_order === segment?.segment_order + 1,
+    );
+    if (!segment) return;
+    const reason = mergeDisabledReason(segment, nextSegment);
+    if (reason) {
+      showToast(reason);
+      return;
+    }
+    if (!window.confirm(
+      `Merge these two subtitles?\n\n${formatTime(segment.start_ms)} ${segment.target_text}`
+      + `\n${formatTime(nextSegment.start_ms)} ${nextSegment.target_text}`
+      + "\n\nThe second subtitle will be removed.",
+    )) return;
+
+    const request = api(`/api/projects/${projectId}/segments/${id}/merge-next`, {
+      method: "POST",
+      body: "{}",
+    }).then(() => true).catch((error) => {
+      showToast(error.message);
+      return false;
+    });
+    state.pendingSaves.add(request);
+    updateSegmentSaveState();
+    const merged = await request;
+    state.pendingSaves.delete(request);
+    updateSegmentSaveState();
+    if (!merged || state.project?.id !== projectId) return;
+
+    state.selectedId = id;
+    if (state.activeId === nextSegment.id) state.activeId = id;
+    state.segmentLoadToken += 1;
+    state.segmentLoadingProjectId = null;
+    await loadSegments(projectId);
+    if (state.reviewMode && !state.reviewIssues.some((issue) => issue.segment_id === id)) {
+      state.reviewMode = false;
+      renderSegments();
+    }
+    if (state.exactPreview.open) {
+      state.exactPreview.segmentId = id;
+      scheduleExactPreview();
+    }
+    requestAnimationFrame(() => {
+      if (state.project?.id === projectId) scrollSegmentListToCenter(id, { instant: true });
+    });
+    showToast("Subtitles merged");
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function splitSegment(id, button) {
+  const projectId = state.project?.id;
+  if (!projectId) return;
+  button.disabled = true;
+  try {
+    if (!(await flushPendingSegmentSaves()) || state.project?.id !== projectId) return;
+    const segment = state.segments.find((item) => item.id === id);
+    if (!segment) return;
+    const reason = splitDisabledReason(segment);
+    if (reason) {
+      showToast(reason);
+      return;
+    }
+    const request = api(`/api/projects/${projectId}/segments/${id}/split`, {
+      method: "POST",
+      body: "{}",
+    });
+    state.pendingSaves.add(request);
+    updateSegmentSaveState();
+    let result;
+    try {
+      result = await request;
+    } finally {
+      state.pendingSaves.delete(request);
+      updateSegmentSaveState();
+    }
+    if (state.project?.id !== projectId) return;
+    state.reviewMode = false;
+    state.selectedId = result.new_segment_id;
+    state.segmentLoadToken += 1;
+    state.segmentLoadingProjectId = null;
+    await loadSegments(projectId);
+    selectSegment(result.new_segment_id, false);
+    requestAnimationFrame(() => {
+      if (state.project?.id !== projectId) return;
+      scrollSegmentListToCenter(result.new_segment_id, { instant: true });
+      $("#segment-list").querySelector(
+        `.segment-row[data-id="${result.new_segment_id}"] .source`,
+      )?.focus({ preventScroll: true });
+    });
+    showToast(segment.chinese_only
+      ? "Subtitle split. Fill in the new Chinese text before rendering."
+      : "Subtitle split. Fill in the new English and Chinese text before rendering.");
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    if (button.isConnected) button.disabled = false;
+  }
+}
+
 function selectSegment(id, seek) {
   state.selectedId = id;
   document.querySelectorAll(".segment-row").forEach((row) => row.classList.toggle("selected", Number(row.dataset.id) === id));
@@ -1182,6 +1389,65 @@ function selectedSegment() {
   return state.segments.find((segment) => segment.id === state.selectedId);
 }
 
+async function saveVideoPosition() {
+  const resume = state.resume;
+  const video = $("#video");
+  if (!resume.ready || state.project?.id !== resume.projectId || !video.currentSrc) return;
+  if (resume.inFlight) await resume.inFlight;
+  if (state.resume !== resume || state.project?.id !== resume.projectId) return;
+  const rawMs = Math.round(video.currentTime * 1000);
+  if (!Number.isFinite(rawMs)) return;
+  const durationMs = Number(state.project.duration_ms);
+  const timeMs = Math.max(0, Number.isFinite(durationMs) && durationMs > 0
+    ? Math.min(rawMs, durationMs) : rawMs);
+  if (timeMs === resume.lastSavedMs) return;
+  const request = api(`/api/projects/${resume.projectId}/resume-time`, {
+    method: "PUT",
+    body: JSON.stringify({ time_ms: timeMs }),
+  }).then((result) => {
+    resume.lastSavedMs = result.time_ms;
+  }).catch((error) => {
+    console.warn("Could not save video position:", error);
+  }).finally(() => {
+    if (resume.inFlight === request) resume.inFlight = null;
+  });
+  resume.inFlight = request;
+  await request;
+}
+
+function restoreVideoPosition(projectId) {
+  const resume = state.resume;
+  const video = $("#video");
+  if (resume.projectId !== projectId || resume.ready || !video.getAttribute("src")) return;
+  const apply = () => {
+    if (state.project?.id !== projectId || state.resume !== resume || resume.ready) return;
+    const savedMs = resume.lastSavedMs;
+    if (savedMs != null && Number.isFinite(savedMs)) {
+      const videoDurationMs = Number.isFinite(video.duration)
+        ? Math.round(video.duration * 1000) : Number(state.project.duration_ms);
+      const latestMs = Number.isFinite(videoDurationMs) && videoDurationMs > 0
+        ? Math.max(0, videoDurationMs - 1) : savedMs;
+      const timeMs = Math.max(0, Math.min(savedMs, latestMs));
+      video.currentTime = timeMs / 1000;
+      const segment = state.segments.find(
+        (item) => item.start_ms <= timeMs && timeMs < item.end_ms,
+      );
+      state.selectedId = segment?.id ?? null;
+      state.activeId = segment?.id ?? null;
+      renderSegments();
+      updatePreview();
+      if (segment) requestAnimationFrame(() => {
+        if (state.project?.id === projectId) {
+          scrollSegmentListToCenter(segment.id, { instant: true });
+        }
+      });
+    }
+    resume.ready = true;
+  };
+  if (video.readyState >= HTMLMediaElement.HAVE_METADATA) apply();
+  else video.addEventListener("loadedmetadata", apply, { once: true });
+}
+
 function updatePreview() {
   const active = state.segments.find((segment) => segment.id === state.activeId);
   const preview = $("#subtitle-preview");
@@ -1194,7 +1460,8 @@ function updatePreview() {
     /[，。,.—–―⸺⸻]+(?=\s*["'”’》」』】）)]*\s*$)/u,
     "",
   );
-  $("#preview-en").textContent = state.project?.bilingual ? active.source_text : "";
+  $("#preview-en").textContent = state.project?.bilingual && !active.chinese_only
+    ? active.source_text : "";
   preview.classList.remove("hidden");
 }
 
@@ -1235,14 +1502,20 @@ function toggleVideoPlaybackFromKeyboard(event) {
   if (event.target.closest("input, textarea, select, button, [contenteditable='true']")) return;
   const workspace = $("#review-workspace");
   const video = $("#video");
+  if (event.target === video || document.activeElement === video) return;
   if (
     !state.project
     || workspace.classList.contains("hidden")
     || workspace.inert
-    || state.exactPreview.open
     || !video.currentSrc
   ) return;
   event.preventDefault();
+  if (state.exactPreview.open) {
+    const projectId = state.project.id;
+    void discardExactPreview().catch((error) => showToast(error.message));
+    if (state.project?.id === projectId) void video.play();
+    return;
+  }
   if (video.paused) void video.play();
   else video.pause();
 }
@@ -1745,6 +2018,28 @@ function stepExactPreview(direction) {
   scheduleExactPreview();
 }
 
+async function cancelRender() {
+  const project = state.project;
+  if (!project || !["render_queued", "rendering"].includes(project.stage)) return;
+  if (!window.confirm("Cancel the current render? The unfinished video will be deleted.")) return;
+  const button = $("#cancel-render");
+  button.disabled = true;
+  try {
+    const result = await api(`/api/projects/${project.id}/cancel-render`, {
+      method: "POST",
+      body: "{}",
+    });
+    showToast(result.status === "cancelled" ? "Render cancelled" : "Stopping render…");
+    if (state.project?.id === project.id) await refreshCurrentProject();
+    else await loadProjects();
+  } catch (error) {
+    showToast(error.message);
+    if (state.project?.id === project.id) await refreshCurrentProject();
+  } finally {
+    if (state.project?.id === project.id) renderProject();
+  }
+}
+
 function scrollSegmentListTo(segmentId) {
   const list = $("#segment-list");
   const row = list.querySelector(`.segment-row[data-id="${segmentId}"]`);
@@ -1784,7 +2079,7 @@ function scrollToActiveSegment() {
     showToast("No subtitle is active at the current playback time");
     return;
   }
-  scrollSegmentListToCenter(state.activeId, { toastIfMissing: true });
+  scrollSegmentListToCenter(state.activeId, { toastIfMissing: true, instant: true });
 }
 
 async function discardExactPreview() {
@@ -1796,14 +2091,12 @@ async function discardExactPreview() {
   state.exactPreview.requestId += 1;
   state.exactPreview.controller?.abort();
   state.exactPreview.controller = null;
-  if (projectId) {
-    try {
-      await api(`/api/projects/${projectId}/exact-preview/cancel`, {
-        method: "POST",
-        body: "{}",
-      });
-    } catch (_) {}
-  }
+  const cancelRequest = projectId
+    ? api(`/api/projects/${projectId}/exact-preview/cancel`, {
+      method: "POST",
+      body: "{}",
+    }).catch(() => {})
+    : Promise.resolve();
   const objectUrls = new Set(state.exactPreview.cache.values());
   if (state.exactPreview.objectUrl) objectUrls.add(state.exactPreview.objectUrl);
   for (const url of objectUrls) URL.revokeObjectURL(url);
@@ -1826,6 +2119,7 @@ async function discardExactPreview() {
   )?.id ?? null;
   updatePreview();
   window.CardsUI?.sync(restoreMs);
+  await cancelRequest;
 }
 
 async function closeSubtitleStylePanel({ refreshExactPreview = true } = {}) {
@@ -1919,13 +2213,19 @@ async function refreshCurrentProject() {
     || (state.segmentDataProjectId !== projectId
       && state.segmentLoadingProjectId !== projectId)
   );
-  if (needsSegments) clearReviewData();
+  if (needsSegments && state.segmentLoadingProjectId === projectId) {
+    state.segmentLoadToken += 1;
+    state.segmentLoadingProjectId = null;
+  }
   state.project = project;
   renderProject();
   renderProviderControl();
   await loadProjects();
   if (state.project?.id !== projectId || loadToken !== state.projectLoadToken) return;
   if (needsSegments) await loadSegments(projectId);
+  if (reviewWorkspaceReady(state.project) && !state.resume.ready) {
+    restoreVideoPosition(projectId);
+  }
   syncPolling();
 }
 
@@ -1954,6 +2254,10 @@ window.addEventListener("focus", () => {
   const refresh = state.project ? refreshCurrentProject() : loadProjects();
   void refresh.catch((error) => console.warn("Project refresh failed:", error));
 });
+
+setInterval(() => {
+  void saveVideoPosition();
+}, 5000);
 
 function openCreateDialog() {
   $("#form-error").classList.add("hidden");
@@ -2012,8 +2316,12 @@ $("#clear-rebuild-parts").addEventListener("click", () => {
   document.querySelectorAll(".rebuild-part-input").forEach((input) => { input.checked = false; });
   updateRebuildDialog();
 });
-$("#scroll-to-active").addEventListener("click", scrollToActiveSegment);
+$("#scroll-to-active").addEventListener("click", (event) => {
+  if (event.detail > 0) event.currentTarget.blur();
+  scrollToActiveSegment();
+});
 $("#approve-render").addEventListener("click", approveAndRender);
+$("#cancel-render").addEventListener("click", cancelRender);
 $("#rebuild-subtitles").addEventListener("click", rebuildSubtitles);
 $("#review-suggestions").addEventListener("click", () => void toggleReviewMode());
 $("#add-context-term").addEventListener("click", () => {
@@ -2032,8 +2340,12 @@ $("#context-overview").addEventListener("input", setTranslationContextDirty);
 $("#context-style").addEventListener("input", setTranslationContextDirty);
 $("#save-context-draft").addEventListener("click", () => void saveTranslationContext());
 $("#approve-context").addEventListener("click", () => void saveTranslationContext({ approve: true }));
-ensureExactPreviewButton()?.addEventListener("click", () => void toggleExactPreview());
-$("#exact-preview-refresh").addEventListener("click", () => {
+ensureExactPreviewButton()?.addEventListener("click", (event) => {
+  if (event.detail > 0) event.currentTarget.blur();
+  void toggleExactPreview();
+});
+$("#exact-preview-refresh").addEventListener("click", (event) => {
+  if (event.detail > 0) event.currentTarget.blur();
   if (!state.project?.video_path) return;
   const seconds = Number($("#exact-preview-time").value);
   if (!Number.isFinite(seconds) || seconds < 0 || seconds * 1000 >= state.project.duration_ms) {

@@ -2,10 +2,22 @@
 
 A local-first workbench for translating and burning subtitles into YouTube videos.
 
-## MVP workflow
+## Documentation and review
+
+Read this page for setup, then [Current behavior](docs/current-behavior.md) for the
+implemented pipeline, review rules, editing, rendering, and storage contracts.
+[Audit: October 15, 2026](docs/audit-2026-10-15.md) lists confirmed gaps and decisions
+that remain open. [HANDOFF](HANDOFF.md) is the maintenance entry point.
+
+The current-behavior document describes implementation, including its limits; prompt
+instructions are not guarantees of translation accuracy. Historical acceptance reports
+and channel editorial material under `product/` are not current application specifications.
+
+## Workflow
 
 1. Paste a public YouTube video URL.
-2. Download the video at up to 1080p and retrieve its English subtitles.
+2. Download at the selected height limit (1080p by default; UI also offers 720p/2160p)
+   and retrieve the video's English subtitles.
 3. Reconstruct a canonical word-level timeline from rolling YouTube captions.
 4. Use WhisperX word alignment when no English subtitles are available.
 5. Split long videos into balanced, natural-boundary parts of about 30 minutes.
@@ -15,8 +27,8 @@ A local-first workbench for translating and burning subtitles into YouTube video
 7. Generate project-wide translation guidance and pause for the user to review its overview,
    style, and preferred terminology.
 8. After approval, translate each complete Part (Pass 1), map that Chinese onto Python-cut
-   English cues (Pass 2), and split Chinese above 24 display units (Pass 3), with Grok Build
-   fallback.
+   English cues (Pass 2), and attempt to split Chinese above 24 display units (Pass 3).
+   Failed splits remain reviewable. Provider fallback depends on the selected mode and Pass.
 9. Checkpoint completed Parts in SQLite so interrupted or quota-limited runs resume in place.
 10. Normalize display text and validate exact token coverage, timing, duration, and reading speed.
 11. Review both languages and adjust subtitle timing in the browser.
@@ -26,8 +38,8 @@ A local-first workbench for translating and burning subtitles into YouTube video
 
 Each project has a separate **Commentary cards** workspace beside Subtitle review. Add a card at
 the player's current time, then edit its Chinese term, English name, explanation, start/end times,
-fade durations, left/right position, width, font, text colors and sizes, padding, and translucent
-background. Cards appear in the upper-left or upper-right of the actual video picture. The initial
+fade durations, left/center/right position, width, font, text colors and sizes, padding, and translucent
+background. Cards appear along the top of the actual video picture. The initial
 position is right and width is 32% of the video; the most recently saved card style becomes the
 default for new cards across projects. Fade-in and fade-out default to 0.8 seconds each. Cards
 cannot overlap, and text that would exceed the safe picture area is rejected with an explanation
@@ -41,20 +53,22 @@ video file. Cards remain in the project when subtitles are rebuilt and never tri
 
 Pass 2 Chinese punctuation is retained in SQLite and in editable subtitle text. The browser
 preview, exact preview, ASS render, and exported Chinese SRT remove trailing commas and periods
-from displayed Segments. Length and reading-speed checks use this displayed text.
+and dash marks from displayed Segments, including before closing quotes/brackets. Question marks,
+exclamation marks, and semicolons remain. Length and reading-speed checks use this displayed text.
 
 The sidebar provider selector supports `Auto: Codex → Grok`, `Codex only`, and `Grok only`.
 The selection is stored per project and is locked while that project is processing. When Codex is
-available in the provider path, its model can be selected from the live catalog returned by the
-local Codex CLI. `CLI configured default` uses the model from `.env`.
+available in the provider path, its model can be selected from the catalog returned by the
+local Codex CLI and cached by the API process. `CLI configured default` uses `CODEX_MODEL`
+from the environment/`.env`, or the CLI default when that value is blank.
 
 ## Requirements
 
 - Python 3.11–3.13 (3.12 recommended)
 - FFmpeg and ffprobe; FFmpeg must include `libass`
 - Node.js 22+ for yt-dlp's YouTube JavaScript challenge support
-- An installed and authenticated Codex CLI as the primary translator
-- Optional: an installed and authenticated Grok Build CLI (`grok`) as fallback
+- At least one installed and authenticated translation CLI: Codex or Grok Build (`grok`)
+- For the default Auto fallback order, authenticate both (Codex → Grok)
 - Optional: an NVIDIA GPU and WhisperX
 
 Check FFmpeg subtitle support:
@@ -86,11 +100,8 @@ GROK_MODEL=
 CODEX_REASONING_EFFORT=high
 ```
 
-Use manual translation mode when only the review workbench is needed:
-
-```dotenv
-TRANSLATION_PROVIDERS=manual
-```
+There is no `manual` translation provider. Existing projects can be reviewed without starting
+a translation job; creating or rebuilding translations requires a supported authenticated CLI.
 
 Install the optional transcription fallback when videos may not contain subtitles:
 
@@ -157,22 +168,31 @@ The stored marks form a punctuated reading view for all later Passes and English
 the immutable `tokens` rows retain their original words and timestamps. A full subtitle
 rebuild clears this stage and enters the new flow.
 
+Pass 2's no-retranslation/no-omission requirement is a prompt instruction. Python checks
+Cue IDs, order, nonempty text, and Token coverage; it does not prove that the Chinese is
+identical to Pass 1. Pass 2 is allowed to adjust Chinese by product design; verbatim
+preservation is not a hard requirement. Pass 3-2 also lacks a Chinese text-conservation check. See the
+[Pass contracts](docs/current-behavior.md#2-pipeline-and-model-call-contracts) for fallback boundaries.
+
 Python must apply only explicit, deterministic rules to model output. It may cut source Cues,
 split at Chinese punctuation, calculate timing and flags, and reject invalid results. It must
 not invent, paraphrase, redistribute, or silently fill Chinese text to make a Pass appear to
-succeed. Mechanical boundary estimates are reviewable fallbacks, not evidence that the
-Chinese matches the English. If Pass 2 returns an empty `target_text`, reject that
-Part's output and inspect Pass 2's prompt and inputs; do not ask another model call or Python
-to supply the missing translation. Apply the same ownership rule to problems in other Passes.
+succeed. Mechanical boundary estimates are recorded in Sub-cue provenance and audit files;
+successful proportional estimates have no dedicated review suggestion today. They do not
+establish semantic alignment. If Pass 2 returns an empty `target_text`, reject that provider's
+output; Auto may try the next provider for the same Pass. Do not add a repair call or Python
+translation to fill the missing Cue. Apply the same ownership rule to other Passes.
 
 ## Data layout
 
 ```text
 data/
 ├─ video_translator_v2.db
+├─ cli-workspace/
 └─ projects/{project_id}/
    ├─ metadata.json
    ├─ source/
+   ├─ artifacts/
    └─ render/
 output/
 └─ {project_id}/
@@ -183,19 +203,26 @@ output/
 ```
 
 SQLite stores projects, jobs, immutable Tokens, Parts, punctuation marks, translation
-contexts, Cues, optional Sub-cues, final Segments, and their provenance links. Video files stay in their project directories. Videos up to 40
-minutes use one Part; longer videos use balanced 20–40 minute Parts centered around 30 minutes.
+contexts, Cues, optional Sub-cues, final Segments, commentary cards, saved defaults, and their
+provenance links. Video files stay in their project directories. A Token timeline up to 40
+minutes uses one Part; longer timelines target balanced 20–40 minute Parts centered around 30
+minutes. Sparse sources and available split boundaries can prevent those target durations.
 A Part is the unit for the Punctuation Pass and each Pass 1, Pass 2, and Pass 3 model call.
 
 Each project in the sidebar has a Delete button beside Rename. Confirming deletion removes its
 database records, downloaded files, artifacts, and versioned files in `output/{project_id}`.
-Projects with queued or running jobs must finish processing before they can be deleted.
+Projects with queued or running jobs cannot be deleted; renders can be cancelled first.
+Shared caches/settings remain. Filesystem removal and database deletion are not one atomic
+transaction; see [cleanup limits](docs/current-behavior.md#8-storage-configuration-and-deletion).
 
 `Rebuild subtitles` requires browser confirmation. Full rebuild synchronously deletes the old
-Pass 0 context, timed tokens, Parts, and cues before it queues a new Pass 0–3 run. Skip Pass 0
-keeps the approved translation guidance. The downloaded video, source captions, project settings,
-and subtitle style are retained. Selected Parts keeps the approved guidance and the current
-subtitles until the chosen Parts finish Pass 1–3, then publishes them together.
+Pass 0 context, timed tokens, Parts, Cues, and Segments before it queues source reconstruction,
+punctuation preparation, and Pass 0–3. Skip Pass 0 keeps the existing guidance and its approval
+state; unapproved guidance still needs approval. The downloaded video, source captions, project
+settings, subtitle style, playback position, cards, and existing output files are retained.
+The project's output link is reset. Selected Parts keeps approved guidance and current subtitle
+rows until the chosen Parts finish Pass 1–3, then publishes them together. It reuses existing
+Cue boundaries and punctuation; it does not re-cut English Cues.
 
 Subtitle rendering is independently configurable by language. A new project copies the style
 from the most recent `Save style`, including whether English subtitles are shown. These `.env`
@@ -234,13 +261,39 @@ that Segment. Saved style changes refresh the PNG only while exact preview is ac
 `Exit preview` while active; exiting removes its temporary images and returns to the browser timing
 preview.
 
-Subtitle text edits are saved to SQLite only when Enter is pressed or the field loses focus. While
+Subtitle text edits are saved to SQLite only when Enter is pressed or the field loses focus.
+Shift+Enter inserts a manual line break in Chinese text; browser preview, exact preview,
+Chinese SRT, and final video preserve it. Automatically generated subtitles still normalize
+layout whitespace. While
 exact FFmpeg preview is active, a successful text save refreshes the current PNG without moving
 focus during ordinary preview navigation. The workbench displays `Unsaved`, `Saving...`, and
 `Saved`; closing or reloading with unfinished saves triggers the browser's unsaved-change warning.
 
-Every render receives the next available version number, so rendering a project again never
-overwrites an earlier MP4. The project page points to the newest completed version.
+Per-Segment `Line gap +30` adds 30 to the project's current line gap in bilingual mode.
+Per-Segment `Chinese only` hides that Segment's English subtitle and puts its Chinese text
+at the base bottom margin. The stored English text stays available for later editing; an
+empty English field is allowed for rendering only while `Chinese only` is checked. English
+SRT export omits these Segments. The source video's own embedded text is unaffected.
+`Merge next` requires confirmation and permits adjacent Segments in the same Part, including
+a whole Cue followed by a Sub-cue. `Scroll to current subtitle` positions the list immediately.
+`Split`, to the right of `Merge with next`, cuts a Segment at its time midpoint. The first
+half keeps both texts; the second starts with empty English and Chinese fields for manual
+editing. Both halves stay in the original Part, and empty text blocks final rendering.
+Video position is saved every five wall-clock seconds while the workspace is ready, even when
+paused; reopening restores that time and selects the covering Segment, if there is one.
+
+There are seven review suggestion types. They are advisory: marking a Segment Reviewed does
+not dismiss a matching rule, and rendering does not require an empty suggestion list. See the
+[exact review rules](docs/current-behavior.md#4-review-suggestions).
+
+Rendering uses H.264/AAC MP4. `RENDER_VIDEO_ENCODER` accepts `libx264` (default), `h264_qsv`,
+or `h264_nvenc`; the GPU choices accelerate encoding, while subtitle/mask compositing remains
+on the CPU. Unsupported hardware fails without automatic CPU fallback. `Cancel render`
+requests cancellation and removes the unfinished output when the worker handles it.
+
+A successful render publishes the next version after existing nonempty `final-v*.mp4` files;
+failed/cancelled attempts can reuse an uncompleted version number. Earlier completed MP4s remain.
+The project page points to its latest published output.
 
 ## Tests
 
@@ -248,7 +301,12 @@ overwrites an earlier MP4. The project page points to the newest completed versi
 .\.venv\Scripts\python.exe -m pytest -q --ignore=tests/test_renderer_integration.py
 .\.venv\Scripts\python.exe -m ruff check .
 node --check app/static/app.js
+node --check app/static/cards.js
 ```
+
+To also exercise real FFmpeg with small generated videos, run
+`.\.venv\Scripts\python.exe -m pytest -q tests/test_renderer_integration.py`.
+Tests simulate translation providers and must not make live translation requests.
 
 ## Domain model and storage
 
@@ -275,14 +333,19 @@ Chinese pieces already split at punctuation. Pass 3-2 splits the other long Chin
 Cues and assigns boundaries. Python validates and stores the pre-merge Sub-cues,
 then stores final Segments and their component links. Final Segments need not match
 source Cues one to one. Manual edits change Segments, not Tokens or Cues.
+Manual Split keeps the original Cue/Sub-cue links on both halves, but clears their exact
+Segment Token ranges because the midpoint is not a Token boundary. Selected-Part rebuild
+uses those source links to validate coverage and regenerates the Part from its Cues.
 
 Pass 0 writes `translation_contexts`; the Punctuation Pass writes `part_punctuation`
 and `punctuation_marks`. The old `data/video_translator.db` is deliberately not
-migrated. The default database is `data/video_translator_v2.db`; use a new database
-when starting this schema.
+migrated. The default database is `data/video_translator_v2.db`. Existing v2 databases receive
+additive migrations for playback position, per-Segment line gap and Chinese-only mode,
+and render cancellation.
 
 The browser Rebuild dialog supports a full rebuild or selected Parts. Selected Parts
-keep the approved Pass 0 guidance and current visible Segments while Pass 1–3 run.
+keep approved Pass 0 guidance and current stored Segments while Pass 1–3 run;
+the UI locks subtitle editing and may hide the workspace during processing.
 After all selected Parts pass validation, their Cues, Sub-cues, and Segments publish
 together under a revision guard.
 

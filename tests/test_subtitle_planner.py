@@ -511,6 +511,22 @@ def test_python_pass3_split_uses_punctuation_and_merges_short_fragments() -> Non
     assert _split_chinese_on_punctuation("没有任何标点的长句") is None
 
 
+def test_python_pass3_keeps_closing_quotes_with_sentence_punctuation() -> None:
+    assert _split_chinese_on_punctuation(
+        "人们：“你得亲自去体验。”但苏菲派有不同的神秘传统，核心在于意识"
+    ) == [
+        "人们：“你得亲自去体验。”",
+        "但苏菲派有不同的神秘传统，",
+        "核心在于意识",
+    ]
+    assert _split_chinese_on_punctuation(
+        "他说：“这是很重要的事！”接着大家又开始讨论。"
+    ) == [
+        "他说：“这是很重要的事！”",
+        "接着大家又开始讨论。",
+    ]
+
+
 def test_short_token_tail_merges_with_previous_chinese_subcue() -> None:
     words = ["and", "that", "has", "been", "built", "upon."]
     tokens = [

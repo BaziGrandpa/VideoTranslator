@@ -13,6 +13,10 @@ from app.services.subtitle_style import merge_subtitle_style
 from app.services.subtitles import validate_segments, write_ass, write_srt
 
 
+class RenderCancelled(Exception):
+    """The user stopped an active render."""
+
+
 def probe_video(video_path: Path) -> tuple[int, int]:
     command = [
         settings.ffprobe_bin,
@@ -85,6 +89,26 @@ def build_filter_graph(
     )
 
 
+def video_encoding_args() -> list[str]:
+    encoder = settings.render_video_encoder
+    if encoder == "h264_nvenc":
+        return [
+            "-c:v", encoder, "-pix_fmt", "yuv420p", "-profile:v", "high",
+            "-preset", "p4", "-rc", "vbr", "-cq", "20", "-b:v", "0",
+        ]
+    if encoder == "h264_qsv":
+        return [
+            "-c:v", encoder, "-pix_fmt", "nv12", "-profile:v", "high",
+            "-preset", "medium", "-global_quality", "20",
+        ]
+    if encoder == "libx264":
+        return [
+            "-c:v", encoder, "-pix_fmt", "yuv420p", "-profile:v", "high",
+            "-crf", "20", "-preset", "medium",
+        ]
+    raise ValueError(f"Unsupported render video encoder: {encoder}")
+
+
 def render_project(
     project_dir: Path,
     video_path: Path,
@@ -92,19 +116,20 @@ def render_project(
     bilingual: bool,
     output_dir: Path | None = None,
     progress_callback: Callable[[int], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
     subtitle_style: dict[str, Any] | None = None,
     cards: list[dict[str, Any]] | None = None,
 ) -> Path:
+    problems = validate_segments(segments)
+    if problems:
+        raise ValueError("；".join(problems[:10]))
+    duration_ms = max(int(segment["end_ms"]) for segment in segments)
     if not command_available(settings.ffmpeg_bin):
         raise RuntimeError(
             "FFmpeg was not found; install a libass-enabled build and add it to PATH"
         )
     if not command_available(settings.ffprobe_bin):
         raise RuntimeError("ffprobe was not found; install the complete FFmpeg package")
-    problems = validate_segments(segments)
-    if problems:
-        raise ValueError("；".join(problems[:10]))
-
     render_dir = project_dir / "render"
     output_dir = output_dir or project_dir / "output"
     render_dir.mkdir(parents=True, exist_ok=True)
@@ -146,16 +171,7 @@ def render_project(
         "[outv]",
         "-map",
         "0:a?",
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-profile:v",
-        "high",
-        "-crf",
-        "20",
-        "-preset",
-        "medium",
+        *video_encoding_args(),
         "-c:a",
         "aac",
         "-b:a",
@@ -164,36 +180,76 @@ def render_project(
         "+faststart",
         str(temporary_output_path),
     ]
-    process = subprocess.Popen(
-        command,
-        cwd=render_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    duration_ms = max(int(segment["end_ms"]) for segment in segments)
-    assert process.stdout is not None
-    for raw_line in process.stdout:
-        key, separator, value = raw_line.strip().partition("=")
-        if separator and key in {"out_time_us", "out_time_ms"} and value.isdigit():
-            encoded_ms = int(value) // 1000
-            percent = min(99, round(encoded_ms * 100 / max(1, duration_ms)))
-            if progress_callback:
-                progress_callback(percent)
-    stderr = process.stderr.read() if process.stderr is not None else ""
-    return_code = process.wait()
-    if return_code != 0:
-        temporary_output_path.unlink(missing_ok=True)
-        tail = "\n".join(stderr.splitlines()[-20:])
-        raise RuntimeError(f"FFmpeg rendering failed:\n{tail}")
-    write_srt(output_dir / f"english-{version_suffix}.srt", segments, "source_text")
-    write_srt(output_dir / f"chinese-{version_suffix}.srt", segments, "target_text")
-    temporary_output_path.replace(output_path)
-    if progress_callback:
-        progress_callback(100)
-    return output_path
+    if should_cancel and should_cancel():
+        raise RenderCancelled("Render cancelled")
+    process = None
+    completed = False
+    published_video = False
+    attempted_srt_paths: list[Path] = []
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=render_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            if should_cancel and should_cancel():
+                raise RenderCancelled("Render cancelled")
+            key, separator, value = raw_line.strip().partition("=")
+            if separator and key in {"out_time_us", "out_time_ms"} and value.isdigit():
+                encoded_ms = int(value) // 1000
+                percent = min(99, round(encoded_ms * 100 / max(1, duration_ms)))
+                if progress_callback:
+                    progress_callback(percent)
+        stderr = process.stderr.read() if process.stderr is not None else ""
+        return_code = process.wait()
+        if should_cancel and should_cancel():
+            raise RenderCancelled("Render cancelled")
+        if return_code != 0:
+            tail = "\n".join(stderr.splitlines()[-20:])
+            raise RuntimeError(f"FFmpeg rendering failed:\n{tail}")
+        for language, field in (("english", "source_text"), ("chinese", "target_text")):
+            srt_path = output_dir / f"{language}-{version_suffix}.srt"
+            attempted_srt_paths.append(srt_path)
+            write_srt(srt_path, segments, field)
+        temporary_output_path.replace(output_path)
+        published_video = True
+        if should_cancel and should_cancel():
+            raise RenderCancelled("Render cancelled")
+        if progress_callback:
+            progress_callback(100)
+        completed = True
+        return output_path
+    finally:
+        # Any exception after spawning must reap FFmpeg, including callback and I/O errors.
+        # Close its pipes before removing this attempt's files on Windows.
+        try:
+            if process is not None:
+                try:
+                    if process.poll() is None:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                finally:
+                    if process.stdout is not None:
+                        process.stdout.close()
+                    if process.stderr is not None:
+                        process.stderr.close()
+        finally:
+            if not completed:
+                temporary_output_path.unlink(missing_ok=True)
+                if published_video:
+                    output_path.unlink(missing_ok=True)
+                for srt_path in attempted_srt_paths:
+                    srt_path.unlink(missing_ok=True)
 
 
 def _next_output_version(output_dir: Path) -> int:

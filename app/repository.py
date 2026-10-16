@@ -16,7 +16,7 @@ from app.services.punctuation import (
     validate_punctuation_annotations,
 )
 from app.services.subtitle_style import merge_subtitle_style
-from app.services.subtitle_text import normalize_segment_texts
+from app.services.subtitle_text import normalize_manual_target_text, normalize_segment_texts
 
 TERMINAL_JOB_STATUSES = {"completed", "failed"}
 
@@ -114,6 +114,21 @@ class Repository:
                 "SELECT * FROM translation_contexts WHERE project_id = ?", (project_id,)
             ).fetchone() if row is not None else None
         return decode_project(row, context) if row is not None else None
+
+    def set_resume_time(self, project_id: str, time_ms: int) -> int:
+        with transaction(self.database_path) as connection:
+            project = connection.execute(
+                "SELECT duration_ms FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            if project is None:
+                raise KeyError(project_id)
+            duration_ms = project["duration_ms"]
+            saved_ms = min(time_ms, int(duration_ms)) if duration_ms is not None else time_ms
+            connection.execute(
+                "UPDATE projects SET resume_time_ms = ? WHERE id = ?",
+                (saved_ms, project_id),
+            )
+        return saved_ms
 
     def list_projects(self) -> list[dict[str, Any]]:
         with connect(self.database_path) as connection:
@@ -319,8 +334,8 @@ class Repository:
                 INSERT INTO segments (
                     project_id, segment_order, start_ms, end_ms, source_text,
                     target_text, start_token_id, end_token_id,
-                    quality_flags, part_id, status, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    quality_flags, part_id, chinese_only, status, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -334,6 +349,7 @@ class Repository:
                         segment.get("end_token_id"),
                         json.dumps(segment.get("quality_flags", [])),
                         segment.get("part_id"),
+                        int(bool(segment.get("chinese_only", False))),
                         segment.get("status", "machine_translated"),
                         timestamp,
                     )
@@ -384,6 +400,31 @@ class Repository:
             segment["components"] = self._segment_components(connection, segment_id)
         return segment
 
+    def segment_component_token_ranges(self, project_id: str) -> dict[int, list[tuple[int, int]]]:
+        """Original Cue/Sub-cue ranges for Segments without an exact Token range."""
+        with connect(self.database_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT sc.segment_id,
+                       COALESCE(sub.start_token_id, cue.start_token_id) AS start_token_id,
+                       COALESCE(sub.end_token_id, cue.end_token_id) AS end_token_id
+                FROM segment_components sc
+                JOIN segments s ON s.id = sc.segment_id
+                JOIN cues cue ON cue.part_id = sc.part_id AND cue.cue_id = sc.cue_id
+                LEFT JOIN subcues sub ON sub.part_id = sc.part_id
+                    AND sub.cue_id = sc.cue_id AND sub.subcue_id = sc.subcue_id
+                WHERE s.project_id = ?
+                ORDER BY sc.segment_id, sc.component_order
+                """,
+                (project_id,),
+            ).fetchall()
+        ranges: dict[int, list[tuple[int, int]]] = {}
+        for row in rows:
+            ranges.setdefault(int(row["segment_id"]), []).append(
+                (int(row["start_token_id"]), int(row["end_token_id"]))
+            )
+        return ranges
+
     @staticmethod
     def _segment_components(connection: sqlite3.Connection, segment_id: int) -> list[dict[str, Any]]:
         return [
@@ -398,6 +439,7 @@ class Repository:
     def _decode_segment(row: sqlite3.Row) -> dict[str, Any]:
         segment = dict(row)
         segment["extra_line_gap"] = bool(segment.get("extra_line_gap", 0))
+        segment["chinese_only"] = bool(segment.get("chinese_only", 0))
         try:
             segment["quality_flags"] = json.loads(segment.get("quality_flags") or "[]")
         except json.JSONDecodeError:
@@ -807,16 +849,16 @@ class Repository:
             )
 
     def update_segment(self, project_id: str, segment_id: int, **fields: Any) -> dict[str, Any]:
-        allowed = {"start_ms", "end_ms", "source_text", "target_text", "status", "extra_line_gap"}
+        allowed = {"start_ms", "end_ms", "source_text", "target_text", "status", "extra_line_gap", "chinese_only"}
         values = {key: value for key, value in fields.items() if key in allowed}
         if "extra_line_gap" in values:
             values["extra_line_gap"] = int(bool(values["extra_line_gap"]))
+        if "chinese_only" in values:
+            values["chinese_only"] = int(bool(values["chinese_only"]))
         if "source_text" in values:
             values["source_text"] = normalize_segment_texts(str(values["source_text"]), "")[0]
         if "target_text" in values:
-            values["target_text"] = normalize_segment_texts("", str(values["target_text"]))[
-                1
-            ]
+            values["target_text"] = normalize_manual_target_text(str(values["target_text"]))
         if values:
             values["updated_at"] = now_iso()
             assignments = ", ".join(f"{key} = ?" for key in values)
@@ -924,7 +966,7 @@ class Repository:
             ).fetchall()
         return [self._decode_segment(row) for row in rows]
 
-    def split_segment(self, project_id: str, segment_id: int, at_ms: int) -> None:
+    def split_segment(self, project_id: str, segment_id: int) -> int:
         with transaction(self.database_path) as connection:
             row = connection.execute(
                 "SELECT * FROM segments WHERE project_id = ? AND id = ?",
@@ -932,14 +974,16 @@ class Repository:
             ).fetchone()
             if row is None:
                 raise KeyError(segment_id)
-            if at_ms <= row["start_ms"] + 100 or at_ms >= row["end_ms"] - 100:
-                raise ValueError("The split point must be at least 100 ms from both boundaries")
-            midpoint = max(1, len(row["source_text"]) // 2)
-            source_left = row["source_text"][:midpoint].strip()
-            source_right = row["source_text"][midpoint:].strip()
-            translated_midpoint = max(1, len(row["target_text"]) // 2)
-            translated_left = row["target_text"][:translated_midpoint].strip()
-            translated_right = row["target_text"][translated_midpoint:].strip()
+            split_ms = (int(row["start_ms"]) + int(row["end_ms"])) // 2
+            if split_ms - int(row["start_ms"]) < 100 or int(row["end_ms"]) - split_ms < 100:
+                raise ValueError("The subtitle must be at least 200 ms long to split")
+            components = self._segment_components(connection, segment_id)
+            part_ids = {int(item["part_id"]) for item in components}
+            if row["part_id"] is not None:
+                part_ids.add(int(row["part_id"]))
+            if not components or len(part_ids) != 1:
+                raise ValueError("This subtitle needs a single Part and Cue provenance to split")
+            part_id = part_ids.pop()
             # Shift through a temporary range to avoid the UNIQUE(project_id, segment_order)
             # constraint being checked row-by-row by SQLite.
             connection.execute(
@@ -952,26 +996,26 @@ class Repository:
             )
             connection.execute(
                 """
-                UPDATE segments SET end_ms = ?, source_text = ?, target_text = ?,
-                    status = 'edited', updated_at = ? WHERE id = ?
+                UPDATE segments SET end_ms = ?, start_token_id = NULL, end_token_id = NULL,
+                    part_id = ?, status = 'edited', updated_at = ? WHERE id = ?
                 """,
-                (at_ms, source_left, translated_left, now_iso(), segment_id),
+                (split_ms, part_id, now_iso(), segment_id),
             )
             inserted = connection.execute(
                 """
                 INSERT INTO segments (
                     project_id, segment_order, start_ms, end_ms, source_text,
-                    target_text, extra_line_gap, status, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'edited', ?)
+                    target_text, part_id, extra_line_gap, chinese_only, status, updated_at
+                ) VALUES (?, ?, ?, ?, '', '', ?, ?, ?, 'edited', ?)
                 """,
                 (
                     project_id,
                     row["segment_order"] + 1,
-                    at_ms,
+                    split_ms,
                     row["end_ms"],
-                    source_right,
-                    translated_right,
+                    part_id,
                     row["extra_line_gap"],
+                    row["chinese_only"],
                     now_iso(),
                 ),
             )
@@ -987,6 +1031,7 @@ class Repository:
                 "UPDATE projects SET subtitle_revision = subtitle_revision + 1, updated_at = ? WHERE id = ?",
                 (now_iso(), project_id),
             )
+            return int(inserted.lastrowid)
 
     def merge_with_next(self, project_id: str, segment_id: int) -> None:
         with transaction(self.database_path) as connection:
@@ -1002,6 +1047,20 @@ class Repository:
             ).fetchone()
             if following is None:
                 raise ValueError("This is already the final subtitle")
+            current_components = self._segment_components(connection, int(current["id"]))
+            following_components = self._segment_components(connection, int(following["id"]))
+            current_parts = {int(item["part_id"]) for item in current_components}
+            following_parts = {int(item["part_id"]) for item in following_components}
+            if current["part_id"] is not None:
+                current_parts.add(int(current["part_id"]))
+            if following["part_id"] is not None:
+                following_parts.add(int(following["part_id"]))
+            if (current_parts or following_parts) and (
+                len(current_parts) != 1 or current_parts != following_parts
+            ):
+                raise ValueError("Subtitles from different Parts cannot be merged")
+            if bool(current["chinese_only"]) != bool(following["chinese_only"]):
+                raise ValueError("Subtitles with different English display settings cannot be merged")
             merged_end_token_id = (
                 following["end_token_id"]
                 if following["end_token_id"] is not None
@@ -1020,22 +1079,20 @@ class Repository:
                         f"{current['source_text']} {following['source_text']}",
                         f"{current['target_text']}{following['target_text']}",
                     )[0],
-                    normalize_segment_texts(
-                        f"{current['source_text']} {following['source_text']}",
-                        f"{current['target_text']}{following['target_text']}",
-                    )[1],
+                    normalize_manual_target_text(
+                        f"{current['target_text']}{following['target_text']}"
+                    ),
                     int(bool(current["extra_line_gap"] or following["extra_line_gap"])),
                     now_iso(),
                     current["id"],
                 ),
             )
-            existing_components = self._segment_components(connection, int(current["id"]))
-            next_order = len(existing_components) + 1
+            next_order = len(current_components) + 1
             existing_keys = {
                 (item["part_id"], item["cue_id"], item["subcue_id"])
-                for item in existing_components
+                for item in current_components
             }
-            for component in self._segment_components(connection, int(following["id"])):
+            for component in following_components:
                 key = (component["part_id"], component["cue_id"], component["subcue_id"])
                 if key in existing_keys:
                     continue
@@ -1337,6 +1394,103 @@ class Repository:
             raise KeyError(job_id)
         return dict(row)
 
+    def render_cancel_requested(self, project_id: str) -> bool:
+        with connect(self.database_path) as connection:
+            row = connection.execute(
+                """SELECT cancel_requested FROM jobs
+                   WHERE project_id = ? AND kind = 'render' AND status = 'running'
+                   ORDER BY started_at DESC LIMIT 1""",
+                (project_id,),
+            ).fetchone()
+        return bool(row and row["cancel_requested"])
+
+    def publish_render(self, project_id: str, output_path: str) -> bool:
+        """Publish project state only if its active render was not cancelled."""
+        with transaction(self.database_path) as connection:
+            job = connection.execute(
+                """SELECT cancel_requested FROM jobs WHERE project_id = ?
+                   AND kind = 'render' AND status = 'running'
+                   ORDER BY started_at DESC LIMIT 1""",
+                (project_id,),
+            ).fetchone()
+            if job is None:
+                raise RuntimeError("The active render job was not found")
+            if job["cancel_requested"]:
+                return False
+            changed = connection.execute(
+                """UPDATE projects SET status = 'completed', stage = 'completed',
+                   progress = 100, pipeline_detail = NULL, output_path = ?,
+                   rendered_revision = subtitle_revision, error = NULL, updated_at = ?
+                   WHERE id = ?""",
+                (output_path, now_iso(), project_id),
+            ).rowcount
+            if changed != 1:
+                raise KeyError(project_id)
+        return True
+
+    def request_render_cancel(self, project_id: str) -> str:
+        """Cancel a queued render now, or signal its running worker to stop."""
+        with transaction(self.database_path) as connection:
+            job = connection.execute(
+                """SELECT * FROM jobs WHERE project_id = ? AND kind = 'render'
+                   AND status IN ('queued', 'running')
+                   ORDER BY created_at DESC LIMIT 1""",
+                (project_id,),
+            ).fetchone()
+            if job is None:
+                raise ValueError("No active render to cancel")
+            project = connection.execute(
+                "SELECT stage FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            if project is None or project["stage"] not in {
+                "render_queued", "rendering", "render_cancelling"
+            }:
+                raise ValueError("The render has already finished")
+            if job["status"] == "queued":
+                self._cancel_render_job(connection, job)
+                return "cancelled"
+            connection.execute(
+                "UPDATE jobs SET cancel_requested = 1 WHERE id = ?", (job["id"],)
+            )
+            connection.execute(
+                """UPDATE projects SET stage = 'render_cancelling',
+                   pipeline_detail = ?, updated_at = ? WHERE id = ?
+                   AND stage IN ('render_queued', 'rendering', 'render_cancelling')""",
+                ('{"label": "Cancelling render"}', now_iso(), project_id),
+            )
+            return "cancelling"
+
+    def cancel_render_job(self, job_id: str) -> None:
+        with transaction(self.database_path) as connection:
+            job = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if job is None:
+                raise KeyError(job_id)
+            if job["kind"] != "render" or job["status"] not in {"queued", "running"}:
+                raise ValueError("Not an active render job")
+            self._cancel_render_job(connection, job)
+
+    @staticmethod
+    def _cancel_render_job(connection: sqlite3.Connection, job: sqlite3.Row) -> None:
+        project = connection.execute(
+            "SELECT output_path FROM projects WHERE id = ?", (job["project_id"],)
+        ).fetchone()
+        if project is None:
+            raise KeyError(job["project_id"])
+        return_status = job["return_status"]
+        if return_status not in {"waiting_review", "completed"}:
+            return_status = "completed" if project["output_path"] else "waiting_review"
+        timestamp = now_iso()
+        connection.execute(
+            """UPDATE jobs SET status = 'cancelled', cancel_requested = 1,
+               finished_at = ?, error = NULL WHERE id = ?""",
+            (timestamp, job["id"]),
+        )
+        connection.execute(
+            """UPDATE projects SET status = ?, stage = ?, progress = 100,
+               pipeline_detail = NULL, error = NULL, updated_at = ? WHERE id = ?""",
+            (return_status, return_status, timestamp, job["project_id"]),
+        )
+
     def claim_next_job(self) -> dict[str, Any] | None:
         with transaction(self.database_path) as connection:
             row = connection.execute(
@@ -1459,6 +1613,8 @@ class Repository:
                         """,
                         (now_iso(), job["id"]),
                     )
+                elif job["kind"] == "render" and job["cancel_requested"]:
+                    self._cancel_render_job(connection, job)
                 else:
                     self._fail_interactive_job(
                         connection, job, "Interrupted while the worker was stopped"

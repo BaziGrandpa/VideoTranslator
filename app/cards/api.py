@@ -27,7 +27,7 @@ def create_router(project_repository: Callable[[], ProjectLookup]) -> APIRouter:
         project = repository.get_project(project_id)
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
-        if editing and project["stage"] in {"render_queued", "rendering"}:
+        if editing and project["stage"] in {"render_queued", "rendering", "render_cancelling"}:
             raise HTTPException(status_code=409, detail="Cards are locked during rendering")
         return project, CardRepository(repository.database_path)
 

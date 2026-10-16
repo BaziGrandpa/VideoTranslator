@@ -108,6 +108,7 @@ class Settings:
     whisper_compute_type: str = os.getenv("WHISPER_COMPUTE_TYPE", "auto")
     ffmpeg_bin: str = os.getenv("FFMPEG_BIN", "ffmpeg")
     ffprobe_bin: str = os.getenv("FFPROBE_BIN", "ffprobe")
+    render_video_encoder: str = os.getenv("RENDER_VIDEO_ENCODER", "libx264").strip().lower()
     chinese_subtitle_font: str = os.getenv("CHINESE_SUBTITLE_FONT", "Microsoft YaHei")
     chinese_subtitle_size: int = int(os.getenv("CHINESE_SUBTITLE_SIZE", "46"))
     chinese_subtitle_color: str = os.getenv("CHINESE_SUBTITLE_COLOR", "#FFFFFF")

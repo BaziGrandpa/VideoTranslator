@@ -17,6 +17,29 @@ def _repository(tmp_path: Path) -> Repository:
     return Repository(database)
 
 
+def test_caption_track_without_speech_reports_no_subtitles(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repository = _repository(tmp_path)
+    project = repository.create_project("https://youtu.be/example")
+    repository.replace_tokens(
+        project["id"],
+        [{"text": "[Music]", "start_ms": 0, "end_ms": 1000, "source": "youtube_auto"}],
+    )
+    job = repository.enqueue_job(project["id"], "translate")
+    monkeypatch.setattr(worker_module, "init_db", lambda: None)
+    monkeypatch.setattr(worker_module, "Repository", lambda: repository)
+    monkeypatch.setattr(worker_module, "settings", SimpleNamespace(ensure_directories=lambda: None))
+
+    worker_module.run_worker(once=True)
+
+    failed = repository.get_project(project["id"])
+    assert failed["status"] == "failed"
+    assert failed["stage"] == "no_subtitles"
+    assert "No usable English subtitles found" in failed["error"]
+    assert repository.get_job(job["id"])["status"] == "failed"
+
+
 @pytest.mark.parametrize(
     ("previous_status", "output_path"),
     [("waiting_review", None), ("completed", "old-final.mp4")],
@@ -173,6 +196,59 @@ def test_render_failure_can_be_followed_by_new_manual_render(tmp_path: Path, mon
     assert second.status_code == 200
     assert second.json()["kind"] == "render"
     assert second.json()["id"] != first_job["id"]
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_cancel_render_restores_project_and_keeps_previous_output(
+    tmp_path: Path, monkeypatch, running: bool
+) -> None:
+    repository = _repository(tmp_path)
+    monkeypatch.setattr(main_module, "repository", repository)
+    client = TestClient(main_module.app)
+    project = repository.create_project("https://youtu.be/example")
+    project_id = project["id"]
+    repository.update_project(
+        project_id, status="queued", stage="render_queued", output_path="old-final.mp4"
+    )
+    job = repository.enqueue_job(project_id, "render", return_status="completed")
+    if running:
+        repository.claim_next_job()
+        repository.update_project(project_id, status="running", stage="rendering")
+
+    response = client.post(f"/api/projects/{project_id}/cancel-render", json={})
+    assert response.status_code == 200
+    if running:
+        assert response.json()["status"] == "cancelling"
+        assert repository.render_cancel_requested(project_id)
+        assert repository.get_project(project_id)["stage"] == "render_cancelling"
+        assert repository.publish_render(project_id, "new-final.mp4") is False
+        repository.cancel_render_job(job["id"])
+    else:
+        assert response.json()["status"] == "cancelled"
+        assert repository.claim_next_job() is None
+
+    restored = repository.get_project(project_id)
+    assert restored["status"] == "completed"
+    assert restored["stage"] == "completed"
+    assert restored["output_path"] == "old-final.mp4"
+    assert restored["error"] is None
+    assert repository.get_job(job["id"])["status"] == "cancelled"
+    assert client.post(f"/api/projects/{project_id}/cancel-render", json={}).status_code == 409
+
+
+def test_worker_restart_finishes_requested_render_cancellation(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    project = repository.create_project("https://youtu.be/example")
+    project_id = project["id"]
+    repository.update_project(project_id, status="queued", stage="render_queued")
+    job = repository.enqueue_job(project_id, "render", return_status="waiting_review")
+    repository.claim_next_job()
+    repository.update_project(project_id, status="running", stage="rendering")
+    repository.request_render_cancel(project_id)
+
+    assert repository.recover_running_jobs() == 1
+    assert repository.get_job(job["id"])["status"] == "cancelled"
+    assert repository.get_project(project_id)["stage"] == "waiting_review"
 
 
 def test_pass2_rolls_back_sentences_when_cue_write_fails(tmp_path: Path, monkeypatch) -> None:

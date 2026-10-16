@@ -1,9 +1,19 @@
 # Video Translator Handoff
 
-Last updated: 2026-10-06
+Last updated: 2026-10-16
 
 This is a local YouTube-to-Chinese-subtitle workbench. The user communicates in Chinese.
-Code, identifiers, UI labels, and documentation use English. Do not commit `ideas.txt`.
+Code, identifiers, UI labels, and documentation use English.
+
+## Documentation map
+
+- [README](README.md): setup, operation, overview, and model-call budget.
+- [Current behavior](docs/current-behavior.md): implemented contracts and exact review rules.
+- [October 15 audit](docs/audit-2026-10-15.md): unresolved defects, requirements gaps, and verification.
+- `product/`: editorial references and explicitly dated historical acceptance reports.
+
+Update the current-behavior document when a contract changes. Record unresolved differences
+in the audit instead of describing a prompt requirement as a Python-enforced guarantee.
 
 ## Constraints
 
@@ -22,11 +32,13 @@ Code, identifiers, UI labels, and documentation use English. Do not commit `idea
 - Final video: `output/<project-id>`
 
 The previous `data/video_translator.db` is intentionally not migrated. Start with a
-new v2 database. Restart the application after JavaScript or prompt changes.
+new v2 database. Restart the application after Python, prompt, or `.env` changes.
+Static assets are served without caching; reload the page after JavaScript/CSS changes.
 
 ```powershell
 .\.venv\Scripts\python.exe -m ruff check .
 node --check app/static/app.js
+node --check app/static/cards.js
 .\.venv\Scripts\python.exe -m pytest -q --ignore=tests/test_renderer_integration.py
 ```
 
@@ -52,8 +64,13 @@ Segment `target_text` keeps punctuation; display/render text removes trailing
 punctuation through `display_target_text`.
 
 Other tables: `projects`, `part_punctuation`, `punctuation_marks`,
-`translation_contexts`, `jobs`, `app_settings`. There are no Window or Batch
-migration tables. `init_db` creates the current schema only.
+`translation_contexts`, `jobs`, `app_settings`, `commentary_cards`, and
+`commentary_card_render_state`. There are no Window or Batch
+migration tables. `init_db` creates the schema and applies additive v2 migrations for
+`projects.resume_time_ms`, `segments.extra_line_gap`, `segments.chinese_only`, and
+`jobs.cancel_requested`. Manual Segment edits preserve Chinese line breaks entered with
+Shift+Enter; the per-Segment Chinese-only flag skips its English render/SRT event and
+allows an empty English field while Chinese remains required.
 
 ## Pipeline ownership
 
@@ -74,18 +91,32 @@ The Punctuation Pass calls only the first selected provider once. Pass 0 uses on
 request for up to 12,000 Tokens, or 6,000-Token chunks and one consolidation for
 longer projects. Pass 1 and Pass 2 use one request per Part. Pass 3-1 and 3-2 each
 use at most one request per Part when needed. A configured provider fallback can
-retry the same Pass after a failed provider call.
+retry the same Pass after a failed provider call. Punctuation has no fallback. Pass 3's
+provider loop covers both subpasses, so fallback can repeat Pass 3-1 as well as Pass 3-2.
 
-Pass 2 prompt behavior is intentionally unchanged apart from output field names.
+Pass 2 requires Chinese preservation in its prompt but does not enforce text conservation.
 Pass 3 prioritizes Chinese readability; English Token ranges locate time.
 No final Cue-to-Segment one-to-one relationship is required.
 
 ## Rebuild and review
 
-A full rebuild clears subtitle state and may preserve approved Pass 0 guidance.
-A selected-Part rebuild keeps visible Segments and Pass 0 until all selected Parts
-finish. It publishes Cues, Sub-cues, Segments, and links together under a subtitle
-revision guard. Review issues are computed from current Segments.
+A full rebuild synchronously clears subtitle state before enqueueing work. Skip Pass 0
+preserves existing guidance and its approval state. A selected-Part rebuild retains stored
+Segments, approved guidance, punctuation, and Cue boundaries until all selected Parts finish.
+It publishes Cues, Sub-cues, Segments, and links together under a subtitle revision guard.
+The UI locks subtitle editing while this runs.
+
+Review suggestions combine current mechanical checks, stored Pass 3 failure flags, and
+Token-derived music/applause boundaries. There are seven types; Reviewed does not dismiss
+them. Rendering checks basic timeline validity, not whether all suggestions are resolved.
+Manual merging does not restamp stored review flags, by design.
+Manual Split divides a Segment at its time midpoint. The left row keeps both texts; the
+new right row starts empty. Both keep the same Part and Cue/Sub-cue links, with null exact
+Token ranges. Selected-Part rebuild validates source coverage through those links; audio
+review also uses them. Rendering rejects the empty row until it is filled in.
+
+Full rebuilds preserve cards, style, playback position, and old output files. Deleting a
+project removes its own database rows and project/output directories; shared caches remain.
 
 ## Code map
 
@@ -96,3 +127,6 @@ revision guard. Review issues are computed from current Segments.
 - Part/Cue cutting: `app/services/parts.py`, `app/services/cues.py`
 - Pass calls and final merging: `app/services/subtitle_planner.py`
 - Rendering and display punctuation: `app/services/renderer.py`, `app/services/subtitle_text.py`
+- Review rules: `app/services/subtitle_quality.py`, `app/main.py:list_review_issues`
+- Cards: `app/cards/`, `app/static/cards.js`, `app/static/cards.css`
+- Process lifecycle: `app/launcher.py`, `app/worker.py`, `scripts/stop.ps1`
