@@ -49,6 +49,10 @@ def run_worker(once: bool = False, poll_seconds: float = 1.0) -> None:
                 pipeline.part_rebuild(job["project_id"])
             elif job["kind"] == "render":
                 pipeline.render(job["project_id"])
+            elif job["kind"] == "generate_cards":
+                pipeline.generate_cards(job["project_id"])
+            elif job["kind"] == "refresh_card_candidates":
+                pipeline.refresh_card_candidates(job["project_id"])
             else:
                 raise RuntimeError(f"Unknown job kind: {job['kind']}")
             repository.complete_job(job["id"])
@@ -65,6 +69,11 @@ def run_worker(once: bool = False, poll_seconds: float = 1.0) -> None:
             logger.warning("Translation paused for quota: %s", exc)
             if job["kind"] == "part_rebuild":
                 repository.fail_interactive_job(job["id"], str(exc))
+            elif job["kind"] == "refresh_card_candidates":
+                repository.fail_job(job["id"], str(exc))
+                repository.update_project(
+                    job["project_id"], error=f"Card candidate refresh paused: {exc}"
+                )
             else:
                 repository.fail_job(job["id"], str(exc))
                 repository.update_project(
@@ -76,6 +85,22 @@ def run_worker(once: bool = False, poll_seconds: float = 1.0) -> None:
         except Exception as exc:
             logger.exception("Job failed")
             error = str(exc)
+            if job["kind"] == "generate_cards":
+                repository.fail_job(job["id"], error)
+                repository.update_project(
+                    job["project_id"], error=f"Card generation failed: {error}"
+                )
+                if once:
+                    return
+                continue
+            if job["kind"] == "refresh_card_candidates":
+                repository.fail_job(job["id"], error)
+                repository.update_project(
+                    job["project_id"], error=f"Card candidate refresh failed: {error}"
+                )
+                if once:
+                    return
+                continue
             if job["kind"] in {"render", "part_rebuild"}:
                 repository.fail_interactive_job(job["id"], error)
             else:

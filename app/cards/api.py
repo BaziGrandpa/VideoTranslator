@@ -18,6 +18,8 @@ class ProjectLookup(Protocol):
 
     def get_project(self, project_id: str) -> dict | None: ...
 
+    def has_active_job(self, project_id: str, kind: str) -> bool: ...
+
 
 def create_router(project_repository: Callable[[], ProjectLookup]) -> APIRouter:
     router = APIRouter(prefix="/api/projects/{project_id}/cards", tags=["cards"])
@@ -29,6 +31,8 @@ def create_router(project_repository: Callable[[], ProjectLookup]) -> APIRouter:
             raise HTTPException(status_code=404, detail="Project not found")
         if editing and project["stage"] in {"render_queued", "rendering", "render_cancelling"}:
             raise HTTPException(status_code=409, detail="Cards are locked during rendering")
+        if editing and repository.has_active_job(project_id, "generate_cards"):
+            raise HTTPException(status_code=409, detail="Cards are locked during generation")
         return project, CardRepository(repository.database_path)
 
     def dimensions(project: dict) -> tuple[int, int]:

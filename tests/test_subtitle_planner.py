@@ -6,6 +6,7 @@ from app.services.prompts import (
     build_part_translation_prompt,
     build_subcue_boundary_prompt,
     build_subcue_split_prompt,
+    build_translation_context_consolidation_prompt,
     build_translation_context_prompt,
 )
 from app.services.subtitle_planner import (
@@ -51,6 +52,17 @@ def test_translation_context_prompt_uses_plain_project_source_and_name_policy() 
     assert "Frequency is evidence, not the rule by itself" in prompt
     assert "generic common nouns" in prompt
     assert "Do not pad the list" in prompt
+    assert "Write the overview and style values in Simplified Chinese" in prompt
+    assert "term source values must retain their original English spelling" in prompt
+
+
+def test_translation_context_consolidation_requests_chinese_guidance() -> None:
+    prompt = build_translation_context_consolidation_prompt(
+        "Test", "zh-CN", [], [], term_limit=TRANSLATION_CONTEXT_TERM_LIMIT
+    )
+
+    assert "Write the final overview and style values in Simplified Chinese" in prompt
+    assert "even if chunk candidates used English" in prompt
 
 
 def test_translation_context_normalization_keeps_edited_person_targets() -> None:

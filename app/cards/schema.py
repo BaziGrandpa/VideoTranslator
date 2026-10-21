@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS commentary_cards (
     chinese_term TEXT NOT NULL,
     english_term TEXT NOT NULL DEFAULT '',
     explanation TEXT NOT NULL,
+    generated_from TEXT,
     style_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL

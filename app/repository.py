@@ -34,14 +34,18 @@ def decode_project(row: sqlite3.Row, context: sqlite3.Row | None = None) -> dict
     except json.JSONDecodeError:
         saved_style = None
     project["subtitle_style"] = merge_subtitle_style(saved_style)
-    project["translation_context"] = (
-        {
+    if context is not None:
+        guidance = {
             "overview": context["overview"],
             "style": context["style"],
             "terms": json.loads(context["terms_json"]),
         }
-        if context is not None else None
-    )
+        candidates = json.loads(context["card_candidates_json"])
+        if candidates:
+            guidance["card_candidates"] = candidates
+        project["translation_context"] = guidance
+    else:
+        project["translation_context"] = None
     project["context_provider"] = context["provider"] if context is not None else None
     project["context_approved"] = bool(context["approved"]) if context is not None else False
     try:
@@ -290,6 +294,7 @@ class Repository:
                 "overview": previous["overview"],
                 "style": previous["style"],
                 "terms": json.loads(previous["terms_json"]),
+                "card_candidates": json.loads(previous["card_candidates_json"]),
             }
         if context is None:
             connection.execute(
@@ -300,17 +305,20 @@ class Repository:
         connection.execute(
             """
             INSERT INTO translation_contexts (
-                project_id, overview, style, terms_json, provider, approved,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                project_id, overview, style, terms_json, card_candidates_json,
+                provider, approved, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(project_id) DO UPDATE SET
                 overview = excluded.overview, style = excluded.style,
-                terms_json = excluded.terms_json, provider = excluded.provider,
+                terms_json = excluded.terms_json,
+                card_candidates_json = excluded.card_candidates_json,
+                provider = excluded.provider,
                 approved = excluded.approved, updated_at = excluded.updated_at
             """,
             (
                 project_id, str(context["overview"]), str(context["style"]),
                 json.dumps(context.get("terms", []), ensure_ascii=False),
+                json.dumps(context.get("card_candidates", []), ensure_ascii=False),
                 str(fields.get("context_provider") or (previous["provider"] if previous else "manual")),
                 int(bool(fields.get("context_approved", previous["approved"] if previous else 0))),
                 previous["created_at"] if previous else timestamp, timestamp,
@@ -1386,6 +1394,15 @@ class Repository:
                 (job_id, project_id, kind, return_status, now_iso()),
             )
         return self.get_job(job_id)
+
+    def has_active_job(self, project_id: str, kind: str) -> bool:
+        with connect(self.database_path) as connection:
+            row = connection.execute(
+                """SELECT 1 FROM jobs WHERE project_id = ? AND kind = ?
+                   AND status IN ('queued', 'running') LIMIT 1""",
+                (project_id, kind),
+            ).fetchone()
+        return row is not None
 
     def get_job(self, job_id: str) -> dict[str, Any]:
         with connect(self.database_path) as connection:

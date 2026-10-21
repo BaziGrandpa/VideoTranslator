@@ -135,6 +135,13 @@ Translation guidance panel lets you edit the project overview, translation style
 translations, categories, and mandatory-use flags. Save a draft to keep the project paused, or
 choose `Save and continue translation` to approve the guidance and queue Pass 1. The approved
 SQLite value is used by every later translation pass.
+Pass 0 asks for the overview and style in Simplified Chinese in both direct and long-video
+consolidation requests. Term sources keep their original English spelling. Existing saved
+guidance is not rewritten; edit it in this panel or rebuild Pass 0 to regenerate it.
+Pass 0 also suggests up to 40 separate commentary card terms. Each keeps the original
+subtitle phrase for timing and a corrected English display term. Candidates whose original
+phrase cannot be found in source Tokens are dropped individually. At the Pass 0 checkpoint,
+reviewers can edit the display term or remove candidates before continuing.
 
 ## Pass responsibilities and LLM call budget
 
@@ -146,13 +153,21 @@ retry a long sentence with different instructions, or silently patch a rejected 
 | Stage | Responsibility | Planned model requests |
 | --- | --- | --- |
 | Punctuation Pass | Before Pass 0, add punctuation after specific original Token IDs in a Part whose original English has zero `, . ? ! : ;` marks. Store the marks separately; never edit Token text or timing. | One request per eligible Part, with no provider fallback or repair call. |
-| Pass 0 | Produce the project overview, style, and terminology for user approval. | One request for up to 12,000 tokens; for longer videos, one per 6,000-token chunk plus one consolidation request. |
+| Pass 0 | Produce the project overview, style, terminology, and card term candidates for user approval. | One request for up to 12,000 tokens; for longer videos, one per 6,000-token chunk plus one consolidation request. |
 | Pass 1 | Translate one complete Part into continuous Chinese. | One request per Part. |
 | Python Cue cutting | Divide the English Timed Tokens into fixed Cues using explicit punctuation, speaker, pause, and length rules. | None. |
 | Pass 2 | Assign the existing Pass 1 Chinese to every ordered Cue without retranslation or omission. | One request per Part. |
 | Pass 3-1 | Assign token boundaries to long Cues already split at Chinese punctuation by Python. | At most one request per Part when needed. |
 | Pass 3-2 | Split other long Chinese Cues and assign their token boundaries. | At most one request per Part when needed. |
 | Python validation | Check IDs, nonempty Chinese, source coverage, boundaries, timing, and review flags. | None. |
+| Card Pass | After final subtitle validation, write a Chinese name and brief background explanation for approved card terms using the complete English Part. | One request per Part containing ungenerated card candidates. |
+
+Card Pass does not choose timestamps. Python locates the first source-term occurrence in
+immutable Tokens, maps it to a Cue, and creates a five-second card using the most recently
+saved card style. Overlaps shift later cards to the next available slot. Existing cards are
+preserved, and a repeated run does not duplicate generated cards. An invalid or missing
+card is skipped and reported without blocking subtitle review; the card workspace can retry
+generation. Generated cards still need visual review before rendering.
 
 These counts describe the planned requests for one run. The Punctuation Pass uses only the
 first selected provider. For later Passes, `Auto: Codex → Grok` may attempt the next configured

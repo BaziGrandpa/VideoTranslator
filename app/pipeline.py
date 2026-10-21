@@ -9,6 +9,7 @@ from app.cards.repository import CardRepository
 from app.config import settings
 from app.repository import Repository
 from app.services.caption_tokens import reconstruct_vtt_tokens
+from app.services.card_generation import generate_cards_for_project
 from app.services.cues import build_cues, classify_token_kinds
 from app.services.downloader import download_youtube
 from app.services.parts import build_parts
@@ -627,6 +628,24 @@ class Pipeline:
             json.dumps(summarize_length_budget(segments), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        if (translation_context or {}).get("card_candidates"):
+            self.repository.update_project(
+                project_id,
+                stage="generating_cards",
+                progress=98,
+                pipeline_detail={"label": "Generating commentary cards"},
+            )
+        card_error = None
+        try:
+            card_result = self.generate_cards(project_id)
+            if card_result["skipped"]:
+                card_error = (
+                    f"Card Pass skipped {len(card_result['skipped'])} candidate(s): "
+                    + ", ".join(card_result["skipped"][:5])
+                )
+        except Exception as exc:
+            card_error = f"Card generation failed: {exc}"
+            logger.exception("Card Pass failed for project %s", project_id)
         self.repository.update_project(
             project_id,
             status="waiting_review",
@@ -634,8 +653,72 @@ class Pipeline:
             progress=100,
             pipeline_detail=None,
             subtitle_revision=max(1, int(project["subtitle_revision"]) + 1),
-            error=None,
+            error=card_error,
         )
+
+    def generate_cards(self, project_id: str) -> dict[str, Any]:
+        project = self.repository.get_project(project_id)
+        if project is None:
+            raise KeyError(project_id)
+        context = project.get("translation_context") or {}
+        if not context.get("card_candidates"):
+            return {"created": 0, "skipped": []}
+        parts = self.repository.list_parts(project_id)
+        if not parts or any(part["status"] != "completed" for part in parts):
+            raise RuntimeError("Card Pass requires completed subtitle Parts")
+        cues_by_part = {
+            int(part["id"]): self.repository.list_cues(int(part["id"])) for part in parts
+        }
+        result = generate_cards_for_project(
+            project, parts, cues_by_part,
+            CardRepository(self.repository.database_path),
+            _provider_order(str(project.get("translation_provider") or "auto")),
+            str(project.get("codex_model") or settings.codex_model),
+            self.project_dir(project_id) / "artifacts" / "card-generation",
+        )
+        warning = (
+            f"Card Pass skipped {len(result['skipped'])} candidate(s): "
+            + ", ".join(result["skipped"][:5])
+            if result["skipped"] else None
+        )
+        self.repository.update_project(project_id, error=warning)
+        return result
+
+    def refresh_card_candidates(self, project_id: str) -> dict[str, Any]:
+        """Rerun Pass 0 on saved tokens while preserving reviewed translation guidance."""
+        project = self.repository.get_project(project_id)
+        if project is None:
+            raise KeyError(project_id)
+        if project["stage"] != "waiting_context_review" or project.get("context_approved"):
+            raise RuntimeError("Card candidates can only be refreshed during Pass 0 review")
+        tokens = self.repository.list_tokens(project_id)
+        if not tokens:
+            raise RuntimeError("Pass 0 has no saved source tokens")
+        providers = _provider_order(str(project.get("translation_provider") or "auto"))
+        codex_model = str(project.get("codex_model") or settings.codex_model)
+        generated, provider = generate_translation_context(
+            tokens,
+            str(project["target_language"]),
+            str(project.get("title") or "Untitled video"),
+            providers,
+            codex_model,
+            audit_dir=self.project_dir(project_id)
+            / "artifacts"
+            / "translation-audit"
+            / "card-candidate-refresh",
+        )
+        candidates = generated.get("card_candidates", [])
+        if not candidates:
+            raise RuntimeError("Pass 0 returned no card candidates; existing guidance was kept")
+        latest = self.repository.get_project(project_id)
+        if latest is None or latest["stage"] != "waiting_context_review":
+            raise RuntimeError("Pass 0 review ended before card candidates could be saved")
+        context = latest.get("translation_context")
+        if not isinstance(context, dict):
+            raise TypeError("Pass 0 translation guidance is missing")
+        updated = {**context, "card_candidates": candidates}
+        self.repository.update_project(project_id, translation_context=updated, error=None)
+        return {"count": len(candidates), "provider": provider}
 
     def _prepare_part_punctuation(
         self,

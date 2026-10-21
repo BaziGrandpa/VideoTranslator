@@ -1,6 +1,6 @@
 # Current behavior
 
-Verified against the working tree on October 16, 2026.
+Verified against the working tree on October 19, 2026.
 This is the detailed implementation reference. [README](../README.md) covers setup;
 [the audit](audit-2026-10-15.md) tracks unresolved differences and risks. Code references
 below identify the implementation to inspect when changing a contract.
@@ -57,13 +57,14 @@ Punctuation Pass. A user-started rebuild is a new run.
 | Stage | Input and output | Planned requests |
 | --- | --- | --- |
 | Punctuation | Original Part Tokens → separate `after_token_id` / mark annotations | One per eligible Part, no fallback |
-| Pass 0 | Project transcript → overview, style, recurring terminology | One up to 12,000 Tokens; otherwise 6,000-Token chunks plus consolidation |
+| Pass 0 | Project transcript → overview, style, recurring terminology, card candidates | One up to 12,000 Tokens; otherwise 6,000-Token chunks plus consolidation |
 | Pass 1 | Whole Part + guidance → continuous Chinese text | One per Part |
 | Python Cue cutting | English Token timeline → fixed Cue ranges | None |
 | Pass 2 | Fixed Cues + Pass 1 reference + guidance → Chinese per Cue | One per Part |
 | Pass 3-1 | Python punctuation-split Chinese pieces → Token boundaries | At most one per Part when needed |
 | Pass 3-2 | Other long Chinese Cues → Chinese pieces and Token boundaries | At most one per Part when needed |
 | Python finalization | Validated ranges → Sub-cues, merged Segments, review flags | None |
+| Card Pass | Complete English Part and approved card terms → Chinese names and short background explanations | One per Part with pending candidates |
 
 **Punctuation eligibility is literal:** a Part must contain zero occurrences of
 `, . ? ! : ;` in its original normalized Tokens. A decimal point or abbreviation counts;
@@ -77,6 +78,16 @@ and up to 40 recurring terms are retained using exact phrase occurrence counts o
 least two. The user may edit the overview, style, terms, categories, and mandatory-use
 flags. Saving a draft remains paused; approval queues translation. Mandatory terminology
 is a prompt instruction, not a deterministic check on every final Segment.
+Direct and chunk-consolidation Pass 0 prompts request Simplified Chinese `overview` and
+`style` values while retaining original English spelling in term `source` values. The
+schema validates structure rather than language, so the user still reviews the result.
+Existing saved contexts are unchanged until edited or regenerated.
+Card candidates are separate from the recurring translation glossary. Pass 0 returns the
+subtitle phrase (`source`) and a corrected English display term (`display`); these may be
+identical. Python matches each source against original Tokens, keeps the first Token span,
+and drops only unmatched candidates. The Pass 0 UI permits removing a candidate or editing
+its display term, while its source phrase remains fixed. The display term need not appear
+verbatim in the transcript.
 
 **Provider behavior:** project modes are Auto, Codex only, and Grok only. Auto uses the
 configured provider order (default Codex → Grok). Punctuation uses the first selected
@@ -307,6 +318,17 @@ Saving style makes it the cross-project default for new cards. Saved card edits 
 the current output. Cards survive subtitle rebuilds and never invoke translation. Card API
 create/update/delete operations return 409 during `render_queued`, `rendering`, and
 `render_cancelling`; editing resumes when the project leaves those stages (audit A07, fixed).
+
+After all Parts complete Pass 3 and final subtitle validation, Card Pass reads each relevant
+complete English Part and its approved candidates. The model supplies a Chinese name and
+an explanation aiming for about 40 Chinese characters, with room for more detail when
+needed, using general background knowledge. Python supplies the corrected English display
+term and maps the first original source occurrence to its Cue,
+uses a five-second duration and the latest saved card style, and shifts cards to avoid
+overlap. Visual-fit checks may skip a card. Generation errors and skipped cards are reported
+without blocking subtitle review. `Generate cards` retries pending candidates, while a
+`generated_from` key keeps retries idempotent and preserves manual cards. Generated cards
+enter the ordinary card workspace for user review before final rendering.
 
 Implementation: [renderer](../app/services/renderer.py), [preview](../app/services/exact_preview.py),
 [cards](../app/cards/), [card UI](../app/static/cards.js).

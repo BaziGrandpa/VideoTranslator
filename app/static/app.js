@@ -65,6 +65,7 @@ const stageNames = {
   splitting_cues: "Splitting overlong Chinese cues",
   waiting_for_quota: "Paused at a saved checkpoint; waiting for CLI quota",
   validating_subtitles: "Validating timing and readability",
+  generating_cards: "Generating commentary cards",
   rebuild_queued: "Queued for subtitle rebuilding",
   part_rebuild_queued: "Queued for selected-Part rebuilding",
   waiting_review: "Waiting for human review",
@@ -614,11 +615,54 @@ function renderTranslationContextTerms(terms) {
   terms.forEach((term) => container.append(createTranslationContextTermRow(term)));
 }
 
+function renderCardCandidates(candidates) {
+  const container = $("#context-card-candidates");
+  container.innerHTML = "";
+  if (!candidates.length) {
+    const empty = document.createElement("div");
+    empty.className = "context-empty";
+    empty.textContent = "No card candidates. Translation can continue without cards.";
+    container.append(empty);
+    return;
+  }
+  candidates.forEach((candidate) => {
+    const row = document.createElement("div");
+    row.className = "context-card-row";
+    row.dataset.source = candidate.source;
+    const source = document.createElement("span");
+    source.className = "context-card-source";
+    source.textContent = candidate.source;
+    const display = document.createElement("input");
+    display.className = "context-card-display";
+    display.type = "text";
+    display.maxLength = 240;
+    display.value = candidate.display || candidate.source;
+    display.addEventListener("input", setTranslationContextDirty);
+    const remove = document.createElement("button");
+    remove.className = "remove-context-term";
+    remove.type = "button";
+    remove.textContent = "×";
+    remove.title = "Remove card candidate";
+    remove.addEventListener("click", () => {
+      row.remove();
+      if (!container.querySelector(".context-card-row")) renderCardCandidates([]);
+      setTranslationContextDirty();
+    });
+    row.append(source, display, remove);
+    container.append(row);
+  });
+}
+
 function renderTranslationContextPanel(project) {
   const panel = $("#translation-context-panel");
   const isWaiting = project.stage === "waiting_context_review"
     && project.translation_context;
   panel.classList.toggle("hidden", !isWaiting);
+  const refreshButton = $("#refresh-card-candidates");
+  refreshButton.disabled = Boolean(project.refreshing_card_candidates);
+  refreshButton.textContent = project.refreshing_card_candidates
+    ? "Generating candidates…" : "Regenerate candidates";
+  $("#approve-context").disabled = Boolean(project.refreshing_card_candidates);
   if (!isWaiting || state.contextDirty) return;
   const context = project.translation_context;
   panel.dataset.projectId = project.id;
@@ -630,6 +674,25 @@ function renderTranslationContextPanel(project) {
   $("#context-save-state").textContent = "Review required before Pass 1";
   $("#context-error").classList.add("hidden");
   renderTranslationContextTerms(Array.isArray(context.terms) ? context.terms : []);
+  renderCardCandidates(Array.isArray(context.card_candidates) ? context.card_candidates : []);
+}
+
+async function refreshCardCandidates() {
+  if (!state.project || state.project.refreshing_card_candidates) return;
+  if (state.contextDirty && !(await saveTranslationContext())) return;
+  const errorBox = $("#context-error");
+  errorBox.classList.add("hidden");
+  try {
+    await api(
+      `/api/projects/${state.project.id}/translation-context/refresh-card-candidates`,
+      { method: "POST" },
+    );
+    showToast("Card candidate generation queued from the saved subtitles");
+    await refreshCurrentProject();
+  } catch (error) {
+    errorBox.textContent = error.message;
+    errorBox.classList.remove("hidden");
+  }
 }
 
 function readTranslationContextPanel() {
@@ -653,7 +716,13 @@ function readTranslationContextPanel() {
       occurrence_count: Number(row.dataset.occurrenceCount) || 0,
     });
   });
-  return { overview, style: $("#context-style").value.trim(), terms };
+  const card_candidates = Array.from(
+    $("#context-card-candidates").querySelectorAll(".context-card-row")
+  ).map((row) => ({
+    source: row.dataset.source,
+    display: row.querySelector(".context-card-display").value.trim(),
+  })).filter((item) => item.display);
+  return { overview, style: $("#context-style").value.trim(), terms, card_candidates };
 }
 
 async function saveTranslationContext({ approve = false } = {}) {
@@ -2199,6 +2268,7 @@ async function refreshCurrentProject() {
   const loadToken = state.projectLoadToken;
   const previousCount = state.project.segment_count;
   const previousRevision = state.project.subtitle_revision;
+  const previousCardCount = state.project.card_count;
   let project;
   try {
     project = await api(`/api/projects/${projectId}`);
@@ -2223,6 +2293,7 @@ async function refreshCurrentProject() {
   await loadProjects();
   if (state.project?.id !== projectId || loadToken !== state.projectLoadToken) return;
   if (needsSegments) await loadSegments(projectId);
+  if (previousCardCount !== state.project.card_count) await window.CardsUI?.loadProject();
   if (reviewWorkspaceReady(state.project) && !state.resume.ready) {
     restoreVideoPosition(projectId);
   }
@@ -2239,7 +2310,10 @@ function reloadAfterMissingProject(error) {
 }
 
 function syncPolling() {
-  const shouldPoll = state.project && ["queued", "running"].includes(state.project.status);
+  const shouldPoll = state.project && (
+    ["queued", "running"].includes(state.project.status)
+    || state.project.refreshing_card_candidates
+  );
   if (!shouldPoll && state.pollTimer) {
     clearInterval(state.pollTimer);
     state.pollTimer = null;
@@ -2340,6 +2414,7 @@ $("#context-overview").addEventListener("input", setTranslationContextDirty);
 $("#context-style").addEventListener("input", setTranslationContextDirty);
 $("#save-context-draft").addEventListener("click", () => void saveTranslationContext());
 $("#approve-context").addEventListener("click", () => void saveTranslationContext({ approve: true }));
+$("#refresh-card-candidates").addEventListener("click", () => void refreshCardCandidates());
 ensureExactPreviewButton()?.addEventListener("click", (event) => {
   if (event.detail > 0) event.currentTarget.blur();
   void toggleExactPreview();

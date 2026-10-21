@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS punctuation_marks (
 CREATE TABLE IF NOT EXISTS translation_contexts (
     project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
     overview TEXT NOT NULL, style TEXT NOT NULL, terms_json TEXT NOT NULL DEFAULT '[]',
+    card_candidates_json TEXT NOT NULL DEFAULT '[]',
     provider TEXT NOT NULL, approved INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
@@ -164,6 +165,23 @@ def init_db(database_path: Path | None = None) -> None:
                 connection.execute(
                     "ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
                 )
+            context_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(translation_contexts)")
+            }
+            if "card_candidates_json" not in context_columns:
+                connection.execute(
+                    "ALTER TABLE translation_contexts ADD COLUMN card_candidates_json "
+                    "TEXT NOT NULL DEFAULT '[]'"
+                )
+            card_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(commentary_cards)")
+            }
+            if "generated_from" not in card_columns:
+                connection.execute("ALTER TABLE commentary_cards ADD COLUMN generated_from TEXT")
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_generated_card_source "
+                "ON commentary_cards(project_id, generated_from)"
+            )
             connection.commit()
         except Exception:
             connection.rollback()

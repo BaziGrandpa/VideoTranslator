@@ -99,6 +99,17 @@
               <span>Source</span><span>Preferred translation</span><span>Occurrences</span><span>Category</span><span>Must use</span><span></span>
             </div>
             <div id="context-terms" class="context-terms"></div>
+            <div class="context-terms-head">
+              <div>
+                <strong>Commentary card candidates</strong>
+                <span class="muted">Keep concepts worth explaining to viewers. The source phrase anchors its first appearance; edit only the displayed English term.</span>
+              </div>
+              <button id="refresh-card-candidates" type="button">Regenerate candidates</button>
+            </div>
+            <div class="context-card-columns" aria-hidden="true">
+              <span>Original subtitle phrase</span><span>Displayed English term</span><span></span>
+            </div>
+            <div id="context-card-candidates" class="context-terms"></div>
             <div id="context-error" class="error-box hidden"></div>
             <div class="context-panel-actions">
               <span id="context-save-state" class="muted">Review required before Pass 1</span>
@@ -197,9 +208,10 @@
               </div>
               <section id="cards-workspace" class="cards-workspace hidden" aria-label="Commentary cards">
                 <div class="cards-toolbar">
-                  <div><strong>Commentary cards</strong><span class="muted">Manual video timeline</span></div>
+                  <div><strong>Commentary cards</strong><span class="muted">Review generated cards and adjust timing</span></div>
                   <div class="cards-toolbar-actions">
                     <span id="card-render-status" class="muted"></span>
+                    <button id="cards-generate" type="button">Generate cards</button>
                     <button id="card-add" type="button">Add card at current time</button>
                     <button id="cards-render" type="button" class="primary">Render new version</button>
                   </div>

@@ -117,6 +117,35 @@ class CardRepository:
         assert result is not None
         return result
 
+    def create_generated(
+        self, project_id: str, source: str, payload: CardPayload
+    ) -> dict[str, Any] | None:
+        """Insert a generated card once without changing the saved manual style default."""
+        key = source.casefold()
+        timestamp = _now_iso()
+        with transaction(self.database_path) as connection:
+            existing = connection.execute(
+                "SELECT id FROM commentary_cards WHERE project_id = ? AND generated_from = ?",
+                (project_id, key),
+            ).fetchone()
+            if existing is not None:
+                return None
+            self._check_overlap(connection, project_id, payload)
+            cursor = connection.execute(
+                """INSERT INTO commentary_cards
+                   (project_id, start_ms, end_ms, chinese_term, english_term,
+                    explanation, generated_from, style_json, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    project_id, payload.start_ms, payload.end_ms, payload.chinese_term,
+                    payload.english_term, payload.explanation, key,
+                    payload.style.model_dump_json(), timestamp, timestamp,
+                ),
+            )
+            self._bump(connection, project_id)
+            card_id = cursor.lastrowid
+        return self.get(project_id, card_id)
+
     def update(self, project_id: str, card_id: int, payload: CardPayload) -> dict[str, Any]:
         timestamp = _now_iso()
         with transaction(self.database_path) as connection:

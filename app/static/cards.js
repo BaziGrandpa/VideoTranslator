@@ -14,6 +14,7 @@
   let isNew = false;
   let dirty = false;
   let tab = "subtitle";
+  let generationJobId = null;
   let draftAsset = null;
   let visualTimer = null;
   let requestNumber = 0;
@@ -123,6 +124,7 @@
       button.className = `card-list-item ${selectedId === card.id ? "selected" : ""}`;
       const title = document.createElement("strong");
       title.textContent = card.chinese_term;
+      if (card.generated_from) title.title = `Generated from: ${card.generated_from}`;
       const times = document.createElement("span");
       times.textContent = `${formatTime(card.start_ms)} – ${formatTime(card.end_ms)}`;
       button.append(title, times);
@@ -177,6 +179,8 @@
 
   async function loadProject() {
     const requestedId = state.project?.id;
+    const switching = requestedId !== projectId;
+    if (switching) generationJobId = null;
     requestNumber += 1;
     revokeAssets();
     field("overlay").classList.add("hidden");
@@ -188,7 +192,7 @@
     isNew = false;
     dirty = false;
     field("editor").classList.add("hidden");
-    setTab("subtitle");
+    if (switching) setTab("subtitle");
     if (!projectId) return;
     const loaded = await api(`/api/projects/${projectId}/cards`);
     if (requestedId !== state.project?.id) return;
@@ -202,7 +206,19 @@
   }
 
   function renderProject() {
-    const locked = projectIsRenderLocked();
+    const locked = projectIsRenderLocked() || Boolean(generationJobId);
+    field("editor").inert = Boolean(generationJobId);
+    const generate = document.getElementById("cards-generate");
+    const pendingCandidates = (state.project?.translation_context?.card_candidates || []).filter(
+      (candidate) => !cards.some(
+        (card) => card.generated_from === candidate.source.toLocaleLowerCase(),
+      ),
+    );
+    generate.classList.toggle("hidden", !pendingCandidates.length);
+    generate.disabled = locked || Boolean(generationJobId)
+      || !["waiting_review", "completed"].includes(state.project?.status);
+    generate.textContent = generationJobId
+      ? "Generating cards…" : `Generate missing cards (${pendingCandidates.length})`;
     field("add").disabled = locked || !state.project?.video_path;
     field("save").disabled = locked;
     field("delete").disabled = locked;
@@ -211,6 +227,42 @@
       ? "Render new version" : "Approve all and render";
     field("render-status").textContent = state.project?.render_is_stale
       ? "Rendered video is outdated" : "";
+  }
+
+  async function generateCards() {
+    if (!projectId || generationJobId || !(await flush())) return;
+    const requestedId = projectId;
+    try {
+      const job = await api(`/api/projects/${requestedId}/generate-cards`, { method: "POST" });
+      generationJobId = job.id;
+      renderProject();
+      const poll = async () => {
+        if (projectId !== requestedId || generationJobId !== job.id) return;
+        try {
+          const current = await api(`/api/jobs/${job.id}`);
+          if (["completed", "failed"].includes(current.status)) {
+            generationJobId = null;
+            if (current.status === "completed") {
+              await loadProject();
+              await window.refreshCurrentProject?.();
+              showToast("Cards generated for review");
+            } else {
+              showToast(`Card generation failed: ${current.error || "Unknown error"}`);
+            }
+            renderProject();
+          } else {
+            setTimeout(() => void poll(), 2000);
+          }
+        } catch (error) {
+          generationJobId = null;
+          renderProject();
+          showToast(error.message);
+        }
+      };
+      setTimeout(() => void poll(), 2000);
+    } catch (error) {
+      showToast(error.message);
+    }
   }
 
   async function selectCard(id) {
@@ -444,6 +496,7 @@
   field("save").addEventListener("click", () => void save());
   field("delete").addEventListener("click", () => void deleteCard());
   document.getElementById("cards-render").addEventListener("click", () => void approveAndRender());
+  document.getElementById("cards-generate").addEventListener("click", () => void generateCards());
   field("editor").addEventListener("input", (event) => {
     if (!event.target.matches("input, textarea, select")) return;
     dirty = true;

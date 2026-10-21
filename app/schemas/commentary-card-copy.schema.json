@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "cards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "source": { "type": "string" },
+          "chinese_term": { "type": "string" },
+          "explanation": { "type": "string" }
+        },
+        "required": ["source", "chinese_term", "explanation"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["cards"],
+  "additionalProperties": false
+}

@@ -92,6 +92,11 @@ button.primary:hover { background: #54e3b3; }
 .context-terms-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 20px; margin-bottom: 9px; }
 .context-terms-head .muted { margin-left: 8px; font-size: 11px; font-weight: 400; }
 .context-term-columns, .context-term-row { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) 76px 130px 70px 44px; gap: 8px; align-items: center; }
+.context-card-columns, .context-card-row { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) 44px; gap: 8px; align-items: center; }
+.context-card-columns { padding: 0 8px 6px; color: #737e8b; font-size: 10px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+.context-card-row { padding: 8px; border: 1px solid #272f35; border-radius: 9px; background: #0f1317; }
+.context-card-source { overflow-wrap: anywhere; color: #aeb7c1; font-size: 12px; }
+.context-card-row input { min-width: 0; width: 100%; }
 .context-term-columns { padding: 0 8px 6px; color: #737e8b; font-size: 10px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
 .context-terms { display: grid; gap: 7px; }
 .context-term-row { padding: 8px; border: 1px solid #272f35; border-radius: 9px; background: #0f1317; }

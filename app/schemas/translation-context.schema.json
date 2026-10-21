@@ -21,8 +21,21 @@
         "required": ["source", "target", "category", "must_use"],
         "additionalProperties": false
       }
+    },
+    "card_candidates": {
+      "type": "array",
+      "maxItems": 60,
+      "items": {
+        "type": "object",
+        "properties": {
+          "source": { "type": "string" },
+          "display": { "type": "string" }
+        },
+        "required": ["source", "display"],
+        "additionalProperties": false
+      }
     }
   },
-  "required": ["overview", "style", "terms"],
+  "required": ["overview", "style", "terms", "card_candidates"],
   "additionalProperties": false
 }

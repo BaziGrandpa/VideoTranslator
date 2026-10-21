@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import command_available, settings
+from app.services.card_candidates import anchor_candidates
 from app.services.cues import (
     LONG_PAUSE_MS,
     classify_token_kinds,
@@ -316,7 +317,9 @@ def generate_translation_context(
         )
         context = _normalize_translation_context(result, term_limit=TRANSLATION_CONTEXT_CHUNK_TERM_LIMIT)
         counted = _add_term_occurrence_counts(context, transcript)
-        return _select_consistency_terms(counted), provider
+        selected = _select_consistency_terms(counted)
+        selected["card_candidates"] = anchor_candidates(context.get("card_candidates", []), tokens)
+        return selected, provider
 
     candidates: list[dict[str, Any]] = []
     used_providers: list[str] = []
@@ -378,7 +381,9 @@ def generate_translation_context(
         consolidated, term_limit=TRANSLATION_CONTEXT_CHUNK_TERM_LIMIT
     )
     counted = _add_term_occurrence_counts(context, full_transcript)
-    return _select_consistency_terms(counted), provider
+    selected = _select_consistency_terms(counted)
+    selected["card_candidates"] = anchor_candidates(context.get("card_candidates", []), tokens)
+    return selected, provider
 
 
 def _normalize_translation_context(
@@ -414,11 +419,22 @@ def _normalize_translation_context(
             }
         )
         seen.add(source.casefold())
-    return {
+    normalized = {
         "overview": overview.strip(),
         "style": style.strip(),
         "terms": normalized_terms[:term_limit],
     }
+    if "card_candidates" in result:
+        raw_candidates = result["card_candidates"]
+        if not isinstance(raw_candidates, list):
+            raise TypeError("Global translation context has an invalid card candidates list")
+        normalized["card_candidates"] = [
+            {"source": str(item.get("source", "")).strip(),
+             "display": str(item.get("display", "")).strip()}
+            for item in raw_candidates
+            if isinstance(item, dict)
+        ]
+    return normalized
 
 
 def _count_term_occurrences(transcript: str, source: str) -> int:

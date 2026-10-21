@@ -79,13 +79,14 @@ allows an empty English field while Chinese remains required.
 | Token preparation | Reconstruct English words and timing | `tokens` |
 | Part planning | Group Tokens into processing ranges | `parts` |
 | Punctuation Pass | Add marks only when a Part lacks supported source punctuation | `part_punctuation`, `punctuation_marks` |
-| Pass 0 | Build project overview, style, and terminology; await approval | `translation_contexts` |
+| Pass 0 | Build project overview, style, terminology, and commentary card candidates; await approval | `translation_contexts` |
 | Pass 1 | Translate the whole Part into natural Chinese with length and punctuation guidance | `parts.source_text`, `parts.target_text` |
 | Python Cue cutting | Fix English Token ranges for Pass 2 | `cues` |
 | Pass 2 | Place Chinese text on each fixed Cue | `cues.target_text`; Part checkpoint |
 | Pass 3-1 | Assign Token boundaries to Chinese punctuation splits | validated `subcues` |
 | Pass 3-2 | Split other long Chinese Cues and assign boundaries | validated `subcues` |
 | Finalization | Merge when needed, validate coverage and quality, publish screen rows | `segments`, `segment_components` |
+| Card Pass | Explain approved card terms after final subtitle validation; Python anchors and schedules cards | `commentary_cards` |
 
 The Punctuation Pass calls only the first selected provider once. Pass 0 uses one
 request for up to 12,000 Tokens, or 6,000-Token chunks and one consolidation for
@@ -93,6 +94,9 @@ longer projects. Pass 1 and Pass 2 use one request per Part. Pass 3-1 and 3-2 ea
 use at most one request per Part when needed. A configured provider fallback can
 retry the same Pass after a failed provider call. Punctuation has no fallback. Pass 3's
 provider loop covers both subpasses, so fallback can repeat Pass 3-1 as well as Pass 3-2.
+Card Pass adds one request per Part containing approved candidates after Pass 3 and final
+subtitle validation; a card failure leaves subtitles available for review and can be retried
+from the card workspace.
 
 Pass 2 requires Chinese preservation in its prompt but does not enforce text conservation.
 Pass 3 prioritizes Chinese readability; English Token ranges locate time.

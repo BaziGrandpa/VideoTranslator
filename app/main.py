@@ -24,6 +24,7 @@ from app.cards.repository import CardRepository
 from app.config import command_available, settings
 from app.db import init_db, transaction
 from app.repository import Repository
+from app.services.card_candidates import anchor_candidates
 from app.services.codex_models import list_codex_models
 from app.services.exact_preview import (
     PreviewCancelled,
@@ -154,6 +155,7 @@ class TranslationContextUpdate(BaseModel):
     overview: str = Field(min_length=1, max_length=12000)
     style: str = Field(default="", max_length=12000)
     terms: list[TranslationContextTerm] = Field(default_factory=list, max_length=40)
+    card_candidates: list[dict[str, str]] | None = Field(default=None, max_length=40)
 
 
 class ExactPreviewRequest(BaseModel):
@@ -198,7 +200,10 @@ def require_project_not_rendering(project_id: str) -> dict:
     return project
 
 
-def normalize_translation_context(payload: TranslationContextUpdate) -> dict:
+def normalize_translation_context(
+    payload: TranslationContextUpdate, project_id: str | None = None,
+    current: dict | None = None,
+) -> dict:
     overview = payload.overview.strip()
     if not overview:
         raise HTTPException(status_code=422, detail="Project overview cannot be empty")
@@ -225,7 +230,15 @@ def normalize_translation_context(payload: TranslationContextUpdate) -> dict:
                 "occurrence_count": item.occurrence_count,
             }
         )
-    return {"overview": overview, "style": payload.style.strip(), "terms": terms}
+    context = {"overview": overview, "style": payload.style.strip(), "terms": terms}
+    raw_candidates = payload.card_candidates
+    if raw_candidates is None and current is not None:
+        raw_candidates = current.get("card_candidates")
+    if raw_candidates is not None and project_id is not None:
+        context["card_candidates"] = anchor_candidates(
+            raw_candidates, repository.list_tokens(project_id)
+        )
+    return context
 
 
 def require_translation_context_review(project_id: str) -> dict:
@@ -450,6 +463,9 @@ def get_project(project_id: str) -> dict:
     project["card_revision"] = card_state["revision"]
     project["rendered_card_revision"] = card_state["rendered_revision"]
     project["card_count"] = len(card_repository.list(project_id))
+    project["refreshing_card_candidates"] = repository.has_active_job(
+        project_id, "refresh_card_candidates"
+    )
     project["render_is_stale"] = (
         project["rendered_revision"] is not None
         and (
@@ -471,10 +487,16 @@ def update_resume_time(project_id: str, payload: ResumeTimeUpdate) -> dict[str, 
 def update_translation_context(
     project_id: str, payload: TranslationContextUpdate
 ) -> dict:
-    require_translation_context_review(project_id)
-    context = normalize_translation_context(payload)
+    project = require_translation_context_review(project_id)
+    context = normalize_translation_context(payload, project_id, project["translation_context"])
     repository.update_project(project_id, translation_context=context)
     return context
+
+
+@app.post("/api/projects/{project_id}/translation-context/refresh-card-candidates")
+def refresh_card_candidates(project_id: str) -> dict:
+    require_translation_context_review(project_id)
+    return repository.enqueue_job(project_id, "refresh_card_candidates")
 
 
 @app.post("/api/projects/{project_id}/translation-context/approve")
@@ -482,7 +504,7 @@ def approve_translation_context(
     project_id: str, payload: TranslationContextUpdate
 ) -> dict:
     project = require_translation_context_review(project_id)
-    context = normalize_translation_context(payload)
+    context = normalize_translation_context(payload, project_id, project["translation_context"])
     partial = isinstance(project.get("pending_rebuild_scope"), dict)
     repository.update_project(
         project_id,
@@ -499,6 +521,24 @@ def approve_translation_context(
         return_status=project["pending_rebuild_scope"].get("return_status") if partial else None,
     )
     return {"context": context, "job": job}
+
+
+@app.post("/api/projects/{project_id}/generate-cards")
+def generate_cards(project_id: str) -> dict:
+    project = require_project_not_rendering(project_id)
+    if project["status"] not in {"waiting_review", "completed"}:
+        raise HTTPException(status_code=409, detail="Finish subtitles before generating cards")
+    if not (project.get("translation_context") or {}).get("card_candidates"):
+        raise HTTPException(status_code=409, detail="This project has no approved card candidates")
+    return repository.enqueue_job(project_id, "generate_cards")
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str) -> dict:
+    try:
+        return repository.get_job(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Job not found") from None
 
 
 @app.patch("/api/projects/{project_id}/name")
@@ -873,6 +913,8 @@ def merge_next(project_id: str, segment_id: int) -> dict:
 @app.post("/api/projects/{project_id}/approve-and-render")
 def approve_and_render(project_id: str) -> dict:
     project = require_project(project_id)
+    if repository.has_active_job(project_id, "generate_cards"):
+        raise HTTPException(status_code=409, detail="Wait for card generation to finish")
     if project["status"] not in {"waiting_review", "completed", "failed"}:
         raise HTTPException(
             status_code=409, detail="The project cannot be rendered in its current state"
