@@ -23,6 +23,7 @@ from app.cards.model import CardPayload
 from app.cards.repository import CardRepository
 from app.config import command_available, settings
 from app.db import init_db, transaction
+from app.publication_api import create_router as create_publication_router
 from app.repository import Repository
 from app.services.card_candidates import anchor_candidates
 from app.services.codex_models import list_codex_models
@@ -31,6 +32,7 @@ from app.services.exact_preview import (
     preview_processes,
     render_exact_preview,
 )
+from app.services.publication_copy import latest_output_srt
 from app.services.subtitle_quality import (
     AUDIO_EFFECT_BOUNDARY,
     audio_effect_boundary_segment_ids,
@@ -54,6 +56,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="Video Translator", version="0.1.0", lifespan=lifespan)
 repository = Repository()
 app.include_router(create_card_router(lambda: repository))
+app.include_router(create_publication_router(lambda: repository))
 
 
 @app.middleware("http")
@@ -463,6 +466,7 @@ def get_project(project_id: str) -> dict:
     project["card_revision"] = card_state["revision"]
     project["rendered_card_revision"] = card_state["rendered_revision"]
     project["card_count"] = len(card_repository.list(project_id))
+    project["publication_available"] = latest_output_srt(project_id) is not None
     project["refreshing_card_candidates"] = repository.has_active_job(
         project_id, "refresh_card_candidates"
     )
@@ -984,6 +988,17 @@ def open_output_folder(project_id: str) -> dict:
 def index() -> FileResponse:
     return FileResponse(
         STATIC_DIR / "index.html",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
+@app.get("/publish/{project_id}")
+def publication_page(project_id: str) -> FileResponse:
+    project = require_project(project_id)
+    if latest_output_srt(project["id"]) is None:
+        raise HTTPException(status_code=409, detail="Render a video before publishing")
+    return FileResponse(
+        STATIC_DIR / "publish.html",
         headers={"Cache-Control": "no-store, max-age=0"},
     )
 

@@ -120,6 +120,37 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS publication_workspaces (
+    project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    copy_status TEXT NOT NULL DEFAULT 'queued', copy_error TEXT,
+    source_srt TEXT NOT NULL, source_url TEXT NOT NULL,
+    titles_json TEXT NOT NULL DEFAULT '[]', intros_json TEXT NOT NULL DEFAULT '[]',
+    selected_title TEXT NOT NULL DEFAULT '', selected_intro TEXT NOT NULL DEFAULT '',
+    thumbnail_titles_json TEXT NOT NULL DEFAULT '[]',
+    thumbnail_status TEXT NOT NULL DEFAULT 'queued', thumbnail_error TEXT,
+    selected_thumbnail_title TEXT NOT NULL DEFAULT '',
+    provider TEXT, reference_path TEXT, reference_revision INTEGER NOT NULL DEFAULT 0,
+    background_status TEXT NOT NULL DEFAULT 'idle', background_error TEXT,
+    background_generation_id TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS publication_covers (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    ratio TEXT NOT NULL CHECK(ratio IN ('16x9', '4x3')),
+    image_path TEXT, design_json TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0,
+    exported_path TEXT, exported_revision INTEGER,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(project_id, ratio)
+);
+CREATE TABLE IF NOT EXISTS publication_cover_styles (
+    project_id TEXT NOT NULL,
+    ratio TEXT NOT NULL CHECK(ratio IN ('16x9', '4x3')),
+    line_count INTEGER NOT NULL CHECK(line_count BETWEEN 1 AND 4),
+    style_json TEXT NOT NULL, updated_at TEXT NOT NULL,
+    PRIMARY KEY(project_id, ratio, line_count),
+    FOREIGN KEY(project_id, ratio) REFERENCES publication_covers(project_id, ratio)
+        ON DELETE CASCADE
+);
 CREATE INDEX IF NOT EXISTS idx_parts_project_number ON parts(project_id, part_number);
 CREATE INDEX IF NOT EXISTS idx_segments_project_order ON segments(project_id, segment_order);
 CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs(status, created_at);
@@ -178,6 +209,25 @@ def init_db(database_path: Path | None = None) -> None:
             }
             if "generated_from" not in card_columns:
                 connection.execute("ALTER TABLE commentary_cards ADD COLUMN generated_from TEXT")
+            publication_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(publication_workspaces)")
+            }
+            publication_additions = {
+                "reference_path": "TEXT",
+                "reference_revision": "INTEGER NOT NULL DEFAULT 0",
+                "background_status": "TEXT NOT NULL DEFAULT 'idle'",
+                "background_error": "TEXT",
+                "background_generation_id": "TEXT",
+                "thumbnail_titles_json": "TEXT NOT NULL DEFAULT '[]'",
+                "thumbnail_status": "TEXT NOT NULL DEFAULT 'queued'",
+                "thumbnail_error": "TEXT",
+                "selected_thumbnail_title": "TEXT NOT NULL DEFAULT ''",
+            }
+            for name, definition in publication_additions.items():
+                if name not in publication_columns:
+                    connection.execute(
+                        f"ALTER TABLE publication_workspaces ADD COLUMN {name} {definition}"
+                    )
             connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_generated_card_source "
                 "ON commentary_cards(project_id, generated_from)"

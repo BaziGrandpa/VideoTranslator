@@ -8,6 +8,16 @@ from app.config import settings
 from app.db import init_db
 from app.pipeline import NoUsableSubtitlesError, Pipeline
 from app.repository import Repository
+from app.services.publication_backgrounds import (
+    generate_publication_backgrounds,
+    mark_background_failed,
+)
+from app.services.publication_copy import (
+    generate_publication_copy,
+    generate_thumbnail_titles,
+    mark_copy_failed,
+    mark_thumbnail_titles_failed,
+)
 from app.services.renderer import RenderCancelled
 from app.services.subtitle_planner import TranslationQuotaError
 
@@ -53,6 +63,12 @@ def run_worker(once: bool = False, poll_seconds: float = 1.0) -> None:
                 pipeline.generate_cards(job["project_id"])
             elif job["kind"] == "refresh_card_candidates":
                 pipeline.refresh_card_candidates(job["project_id"])
+            elif job["kind"] == "generate_publication_copy":
+                generate_publication_copy(job["project_id"], repository)
+            elif job["kind"] == "generate_thumbnail_titles":
+                generate_thumbnail_titles(job["project_id"], repository)
+            elif job["kind"] == "generate_publication_backgrounds":
+                generate_publication_backgrounds(job["project_id"], repository)
             else:
                 raise RuntimeError(f"Unknown job kind: {job['kind']}")
             repository.complete_job(job["id"])
@@ -67,7 +83,16 @@ def run_worker(once: bool = False, poll_seconds: float = 1.0) -> None:
             )
         except TranslationQuotaError as exc:
             logger.warning("Translation paused for quota: %s", exc)
-            if job["kind"] == "part_rebuild":
+            if job["kind"] == "generate_publication_copy":
+                repository.fail_job(job["id"], str(exc))
+                mark_copy_failed(job["project_id"], repository, str(exc))
+            elif job["kind"] == "generate_thumbnail_titles":
+                repository.fail_job(job["id"], str(exc))
+                mark_thumbnail_titles_failed(job["project_id"], repository, str(exc))
+            elif job["kind"] == "generate_publication_backgrounds":
+                repository.fail_job(job["id"], str(exc))
+                mark_background_failed(job["project_id"], repository, str(exc))
+            elif job["kind"] == "part_rebuild":
                 repository.fail_interactive_job(job["id"], str(exc))
             elif job["kind"] == "refresh_card_candidates":
                 repository.fail_job(job["id"], str(exc))
@@ -85,6 +110,24 @@ def run_worker(once: bool = False, poll_seconds: float = 1.0) -> None:
         except Exception as exc:
             logger.exception("Job failed")
             error = str(exc)
+            if job["kind"] == "generate_publication_copy":
+                repository.fail_job(job["id"], error)
+                mark_copy_failed(job["project_id"], repository, error)
+                if once:
+                    return
+                continue
+            if job["kind"] == "generate_thumbnail_titles":
+                repository.fail_job(job["id"], error)
+                mark_thumbnail_titles_failed(job["project_id"], repository, error)
+                if once:
+                    return
+                continue
+            if job["kind"] == "generate_publication_backgrounds":
+                repository.fail_job(job["id"], error)
+                mark_background_failed(job["project_id"], repository, error)
+                if once:
+                    return
+                continue
             if job["kind"] == "generate_cards":
                 repository.fail_job(job["id"], error)
                 repository.update_project(

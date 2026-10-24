@@ -67,6 +67,7 @@ button.primary:hover { background: #54e3b3; }
 .project-header { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 22px; }
 .project-header h1 { margin: 7px 0 7px; font-size: 28px; }
 #project-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; max-width: 600px; }
+.project-header-actions { display: grid; justify-items: end; gap: 8px; }
 #project-actions .output-location { flex-basis: 100%; text-align: right; }
 .pipeline-card { background: var(--panel); border: 1px solid var(--border); border-radius: 13px; padding: 16px 18px; margin-bottom: 20px; }
 .pipeline-top { display: flex; justify-content: space-between; margin-bottom: 11px; }

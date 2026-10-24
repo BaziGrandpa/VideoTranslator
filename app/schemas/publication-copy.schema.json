@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "titles": {"type": "array", "minItems": 6, "maxItems": 6, "items": {"type": "string"}},
+    "intros": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "string"}}
+  },
+  "required": ["titles", "intros"],
+  "additionalProperties": false
+}

@@ -445,6 +445,11 @@ function renderProject() {
   const actions = $("#project-actions");
   actions.innerHTML = "";
   actions.inert = renderLocked;
+  const publishButton = $("#publish-workbench-button");
+  publishButton.disabled = !project.publication_available;
+  publishButton.title = project.publication_available
+    ? "Open the publishing workbench"
+    : "Render at least one video to unlock publishing";
   if (["failed", "waiting_for_quota"].includes(project.status) && project.stage !== "no_subtitles") {
     const retry = document.createElement("button");
     retry.textContent = project.status === "waiting_for_quota" ? "Resume translation" : "Retry failed step";
@@ -2596,4 +2601,19 @@ $("#delete-project-form").addEventListener("submit", async (event) => {
   }
 });
 
-Promise.all([loadHealth(), loadCodexModels(), loadProjects()]).catch((error) => showToast(error.message));
+Promise.all([loadHealth(), loadCodexModels(), loadProjects()])
+  .then(async () => {
+    const projectId = new URLSearchParams(window.location.search).get("project");
+    if (projectId && state.projects.some((project) => project.id === projectId)) {
+      await openProject(projectId);
+    }
+  })
+  .catch((error) => showToast(error.message));
+
+$("#publish-workbench-button").addEventListener("click", async () => {
+  if (!state.project?.publication_available) return;
+  if (window.CardsUI && !(await window.CardsUI.flush())) return;
+  if (!(await flushPendingSegmentSaves())) return;
+  await saveVideoPosition();
+  window.location.href = `/publish/${state.project.id}`;
+});

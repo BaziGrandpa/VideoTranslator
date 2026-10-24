@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Publishing workbench · Video Translator</title>
+    <link rel="stylesheet" href="/static/publish.css" />
+    <script src="/static/publish.js" defer></script>
+  </head>
+  <body>
+    <main class="publish-shell">
+      <header class="publish-header">
+        <div>
+          <div class="eyebrow">PUBLISHING WORKBENCH</div>
+          <h1 id="project-name">发布工作台</h1>
+          <p>准备文案和两张封面，然后复制、下载并手动发布到 B 站。</p>
+        </div>
+        <a id="back-link" href="/">← 返回视频项目</a>
+      </header>
+
+      <section class="panel" aria-labelledby="copy-heading">
+        <div class="section-heading">
+          <div><span class="step">01</span><h2 id="copy-heading">标题与简介</h2></div>
+          <span id="copy-status" class="status">正在准备…</span>
+        </div>
+        <p class="hint">首次进入时后台读取已导出的完整中文字幕，生成 6 个标题和 3 个简介。结果会留在项目中。</p>
+        <div id="copy-error" class="error hidden"></div>
+        <button id="retry-copy" type="button" class="hidden">重试生成文案</button>
+        <div id="copy-editor" class="hidden">
+          <div class="copy-grid">
+            <div>
+              <h3>标题候选</h3>
+              <div id="title-candidates" class="candidate-list"></div>
+              <label for="selected-title">最终视频标题</label>
+              <input id="selected-title" type="text" maxlength="200" />
+              <button id="copy-title" type="button">复制标题</button>
+            </div>
+            <div>
+              <h3>简介候选</h3>
+              <div id="intro-candidates" class="candidate-list"></div>
+              <label for="selected-intro">最终简介正文</label>
+              <textarea id="selected-intro" rows="5" maxlength="2000"></textarea>
+              <label for="final-intro">复制时自动附上固定尾部</label>
+              <textarea id="final-intro" rows="10" readonly></textarea>
+              <button id="copy-intro" type="button">复制完整简介</button>
+            </div>
+          </div>
+          <p id="copy-save-status" class="save-status">已保存</p>
+        </div>
+        <div class="thumbnail-copy-block">
+          <div class="section-heading"><h3>封面短句候选（5 条）</h3><span id="thumbnail-status" class="status">正在准备…</span></div>
+          <p class="hint">封面短句比视频标题更短，可单独修改；选中后复制，或填入当前画幅的封面标题。</p>
+          <div id="thumbnail-error" class="error hidden"></div>
+          <button id="retry-thumbnail-titles" type="button" class="hidden">重试生成封面短句</button>
+          <div id="thumbnail-editor" class="hidden">
+            <div id="thumbnail-candidates" class="candidate-list thumbnail-candidates"></div>
+            <label for="selected-thumbnail-title">选定的封面短句</label>
+            <input id="selected-thumbnail-title" type="text" maxlength="24" />
+            <div class="preview-actions">
+              <button id="copy-thumbnail-title" type="button">复制封面短句</button>
+              <button id="apply-thumbnail-title" type="button">填入当前画幅</button>
+              <span id="thumbnail-save-status" class="muted"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="background-heading">
+        <div class="section-heading">
+          <div><span class="step">02</span><h2 id="background-heading">生成无字底图</h2></div>
+          <span id="background-status" class="status">等待参考图</span>
+        </div>
+        <p class="hint">上传或粘贴一张参考图。点击生成后，Codex CLI 先设计 4:3 主构图，再向左右扩展生成 16:9 底图，让两版主要画面保持一致。生成过程在后台运行，原图会保存在项目中。</p>
+        <div id="reference-zone" class="paste-zone reference-zone" tabindex="0">
+          <img id="reference-preview" class="hidden" alt="已保存的参考图" />
+          <span id="reference-placeholder">点击这里并按 Ctrl+V，或选择图片上传</span>
+        </div>
+        <div class="preview-actions">
+          <input id="reference-file" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+          <button id="select-reference" type="button">上传参考图</button>
+          <button id="paste-reference" type="button">粘贴参考图</button>
+          <button id="generate-backgrounds" type="button" class="primary" disabled>生成两张底图</button>
+          <span id="reference-status" class="muted"></span>
+        </div>
+        <div id="background-error" class="error hidden"></div>
+        <div class="background-grid">
+          <div><strong>4:3 主底图</strong><img id="background-4x3" class="hidden" alt="4:3 无字底图" /><span id="background-placeholder-4x3" class="muted">尚无底图</span></div>
+          <div><strong>16:9 延展底图</strong><img id="background-16x9" class="hidden" alt="16:9 无字底图" /><span id="background-placeholder-16x9" class="muted">尚无底图</span></div>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="cover-heading">
+        <div class="section-heading">
+          <div><span class="step">03</span><h2 id="cover-heading">封面排版</h2></div>
+          <span id="cover-save-status" class="status">未上传</span>
+        </div>
+        <p class="hint">审核上面的两张底图后，分别编辑两个画幅的文字与遮罩。也可以在这里手动替换某一版底图；先点击对应上传区，再按 Ctrl+V。</p>
+        <div class="ratio-tabs" role="tablist" aria-label="封面比例">
+          <button type="button" data-ratio="16x9" class="active" role="tab" aria-selected="true">16:9 标准封面</button>
+          <button type="button" data-ratio="4x3" role="tab" aria-selected="false">4:3 合集封面</button>
+        </div>
+        <div class="cover-layout">
+          <div class="preview-column">
+            <div id="paste-zone" class="paste-zone" tabindex="0">
+              <div id="cover-canvas" class="cover-canvas hidden">
+                <img id="cover-preview" alt="当前比例封面预览" />
+                <div id="text-drag-region" class="text-drag-region hidden" role="button" tabindex="0" aria-label="拖动封面文字调整位置"><span id="text-drag-measure"></span></div>
+              </div>
+              <span id="preview-placeholder">生成或手动上传底图后预览</span>
+            </div>
+            <div class="preview-actions">
+              <input id="image-file" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+              <button id="select-image" type="button">手动上传此版底图</button>
+              <button id="paste-image" type="button">粘贴此版底图</button>
+              <span id="image-status" class="muted"></span>
+            </div>
+            <p class="hint">这里只上传无字底图。不要把本页预览或已渲染的封面重新上传，否则旧文字会留在底图里。</p>
+            <p id="preview-status" class="save-status"></p>
+            <p class="hint drag-hint">拖动预览中的文字区域可调整位置；水平和垂直位置数值会同步更新并自动保存。</p>
+          </div>
+          <div class="design-fields">
+            <label>封面标题（Enter 确认；Shift+Enter 换行）<textarea id="design-title" rows="4" maxlength="120"></textarea></label>
+            <span id="title-confirm-status" class="muted"></span>
+            <div class="inline-actions"><button id="use-video-title" type="button">填入视频标题</button></div>
+            <label>高亮文字（多个词用英文逗号分隔）<input id="design-highlight" type="text" /></label>
+            <p class="hint">16:9 的封面标题和高亮词保存后会同步到 4:3；两版排版参数分别保存。</p>
+            <div class="field-grid">
+              <label>字体<select id="design-font"><option>Microsoft YaHei</option><option>SimHei</option><option>SimSun</option></select></label>
+              <label>字重<select id="design-weight"><option value="bold">粗体</option><option value="regular">常规</option></select></label>
+              <label>字号<input id="design-size" type="number" min="24" max="240" /></label>
+              <label>行距<input id="design-line-spacing" type="number" min="0.75" max="1.8" step="0.01" /></label>
+              <label>水平位置 %<input id="design-x" type="number" min="0" max="90" step="0.5" /></label>
+              <label>垂直位置 %<input id="design-y" type="number" min="0" max="90" step="0.5" /></label>
+              <label>普通文字<input id="design-color" type="color" /></label>
+              <label>高亮文字<input id="design-highlight-color" type="color" /></label>
+            </div>
+            <details open>
+              <summary>左侧渐变遮罩</summary>
+              <div class="field-grid">
+                <label>实色区域 %<input id="mask-solid" type="number" min="0" max="90" step="1" /></label>
+                <label>覆盖宽度 %<input id="mask-width" type="number" min="10" max="100" step="1" /></label>
+                <label>最高透明度 %<input id="mask-opacity" type="number" min="0" max="100" step="1" /></label>
+                <label>渐变曲线<input id="mask-gamma" type="number" min="0.2" max="4" step="0.05" /></label>
+              </div>
+            </details>
+            <details open>
+              <summary>文字阴影</summary>
+              <p class="hint">0–100% 调整阴影透明度；超过 100% 会扩展柔和的阴影范围。模糊越高边缘越软，偏移控制方向。</p>
+              <div class="field-grid">
+                <label>强度 %<input id="shadow-opacity" type="number" min="0" max="300" step="1" /></label>
+                <label>模糊<input id="shadow-blur" type="number" min="0" max="45" step="1" /></label>
+                <label>水平偏移<input id="shadow-dx" type="number" min="-30" max="30" step="1" /></label>
+                <label>垂直偏移<input id="shadow-dy" type="number" min="-30" max="30" step="1" /></label>
+              </div>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel export-panel" aria-labelledby="export-heading">
+        <div class="section-heading"><div><span class="step">04</span><h2 id="export-heading">导出最终封面</h2></div></div>
+        <p class="hint">确认两张底图并完成排版后，点击一次生成两张成品。成品会保存到该项目的视频输出文件夹；修改设计参数后可再次渲染，不会重新调用 Codex。</p>
+        <button id="render-covers" type="button" class="primary">渲染最终封面</button>
+        <div id="export-error" class="error hidden"></div>
+        <div class="output-folder-actions">
+          <button id="open-output-folder" type="button">打开输出文件夹</button>
+          <span id="export-status" class="muted">尚未渲染最终封面</span>
+        </div>
+      </section>
+      <div id="toast" class="toast hidden" role="status"></div>
+    </main>
+  </body>
+</html>

@@ -34,6 +34,56 @@ and channel editorial material under `product/` are not current application spec
 11. Review both languages and adjust subtitle timing in the browser.
 12. Confirm the timeline, then use FFmpeg to add gradient masks and burn styled ASS subtitles.
 
+## Publishing workbench
+
+After a project has produced at least one complete MP4 and matching Chinese SRT, its
+**Publishing workbench** button opens a separate page. The first visit queues a background
+copywriting job using the project's selected Codex/Grok provider mode. It reads the complete
+Chinese SRT from that successful render, creates six title candidates and three intro bodies,
+and saves them in SQLite. A second background CLI job generates five shorter thumbnail text
+suggestions from the same subtitles, including for workspaces created before this feature.
+The suggestions can be edited, copied, or inserted into the current cover ratio. Long subtitles
+are summarized in sequential chunks before the
+candidate request; the workbench remains usable while this job runs. Reopening the page or
+rendering another video version does not replace saved publication copy. A failed copywriting
+job can be retried from the workbench without changing the video project's status.
+
+Choose or edit the final title and intro body in the workbench. The title always ends with
+`【中英字幕】`. Copying the intro appends the saved project's real YouTube URL and the fixed
+channel attribution/copyright footer with stable blank lines.
+
+Upload or paste one reference image, then click **Generate two backgrounds**. An asynchronous
+Codex CLI job attaches that image and invokes `$imagegen` twice. It designs the 4:3 master
+background first, then gives the generated 4:3 image, a 16:9 side-outpainting guide, and the
+original image to the 16:9 generation call. After that image-model call, the full 4:3
+composition is scaled into the 16:9 center with feathered side edges, keeping the person
+and scene consistent across both ratios. The job
+validates both PNGs before publishing
+either one; a failed retry leaves the previous backgrounds available. The reference and each
+generation remain in `data/projects/{project_id}/publication/`. Codex image generation uses
+the CLI's authenticated ChatGPT session, so test that the local CLI can access `$imagegen`.
+Manual upload or paste of either background remains available.
+
+Each ratio stores its own title and separate style presets for one, two, three, and four
+manual title lines. Press Enter to confirm a title and load that ratio's saved line-count
+style; Shift+Enter inserts a manual line break. A new preset copies the current style,
+then later edits save to that preset. Titles longer than four lines use the four-line
+style. A newly opened workbench copies the most recent earlier workbench's saved presets
+and active style for each ratio, excluding cover titles, highlighted words, and images.
+Within one workbench, confirming the 16:9 title or saving its highlighted words updates
+the 4:3 title and highlighted words. Each ratio keeps its own layout settings.
+Each preset includes highlighted words, font, size, weight, spacing, placement,
+colors, left gradient mask, and shadow. The renderer layers a broad and a firm directional
+drop shadow, scaling the offset with font size so the shadow stays visible on large titles.
+Shadow strength above 100% broadens the soft cast shadow, up to 300%.
+The preview and export use the same Pillow compositor; editing these layers
+never calls an image model. Drag the text region in the preview to update that ratio's
+horizontal and vertical position. **Render final covers** saves `thumbnail-16x9.png` and
+`thumbnail-4x3.png` beside the video in `output/{project_id}/`; the workbench has one button
+to open that folder. Rendering again updates those files. The image backgrounds, design
+settings, candidates, selected copy, and exports remain with the project until it is deleted.
+Publishing to Bilibili is manual.
+
 ## Manual commentary cards
 
 Each project has a separate **Commentary cards** workspace beside Subtitle review. Add a card at

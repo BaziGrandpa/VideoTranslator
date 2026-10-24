@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "thumbnail_titles": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {"type": "string"}
+    }
+  },
+  "required": ["thumbnail_titles"],
+  "additionalProperties": false
+}

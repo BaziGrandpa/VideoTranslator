@@ -133,4 +133,7 @@ project removes its own database rows and project/output directories; shared cac
 - Rendering and display punctuation: `app/services/renderer.py`, `app/services/subtitle_text.py`
 - Review rules: `app/services/subtitle_quality.py`, `app/main.py:list_review_issues`
 - Cards: `app/cards/`, `app/static/cards.js`, `app/static/cards.css`
+- Publishing workbench: `app/publication_api.py`, `app/services/publication_copy.py`,
+  `app/services/publication_backgrounds.py`, `app/services/publication_cover.py`,
+  `app/static/publish.*`
 - Process lifecycle: `app/launcher.py`, `app/worker.py`, `scripts/stop.ps1`
